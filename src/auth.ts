@@ -6,25 +6,11 @@ import * as readline from "node:readline/promises";
 import { exec } from "node:child_process";
 import { TokensData, PkceSession } from "./types.js";
 
-export const ENV_CONFIGS = {
-  prod: {
-    domain: "auth.jumbo.com",
-    client_id: "JxF3wi1b7MOTd9qXutaxqd9uHt4KmG3U",
-    audience: "https://jumbo.com/web",
-    base_url: "https://www.jumbo.com",
-  },
-  test: {
-    domain: "auth.test.jumbo.com",
-    client_id: "JKlcUL4EXlDQ73U6jtVidKTQpzP6ucKk",
-    audience: "https://jumbo.com/web",
-    base_url: "https://test.jumbo.com",
-  },
-  acc: {
-    domain: "auth.acc.jumbo.com",
-    client_id: "ZPS3vKQfP43xgvN0k8Ve2dyIvdUMMqg4",
-    audience: "https://jumbo.com/web",
-    base_url: "https://acc-ish.jumbo.com",
-  },
+export const AUTH_CONFIG = {
+  domain: "auth.jumbo.com",
+  client_id: "JxF3wi1b7MOTd9qXutaxqd9uHt4KmG3U",
+  audience: "https://jumbo.com/web",
+  base_url: "https://www.jumbo.com",
 } as const;
 
 export const REDIRECT_URI = "jumbo://callbacks/login";
@@ -105,18 +91,16 @@ export function saveTokens(tokens: TokensData): void {
 }
 
 export function buildAuthorizeUrl(
-  env: keyof typeof ENV_CONFIGS = "prod",
   scope: string = "openid profile email offline_access"
 ): { url: string; session: PkceSession } {
-  const cfg = ENV_CONFIGS[env];
   const { codeVerifier, codeChallenge } = generatePkce();
   const state = generateRandomString(32);
   const nonce = generateRandomString(32);
 
   const params = new URLSearchParams({
-    client_id: cfg.client_id,
+    client_id: AUTH_CONFIG.client_id,
     redirect_uri: REDIRECT_URI,
-    audience: cfg.audience,
+    audience: AUTH_CONFIG.audience,
     scope,
     response_type: "code",
     response_mode: "query",
@@ -130,11 +114,10 @@ export function buildAuthorizeUrl(
     prompt: "login",
   });
 
-  const url = `https://${cfg.domain}/authorize?${params.toString()}`;
+  const url = `https://${AUTH_CONFIG.domain}/authorize?${params.toString()}`;
   const session: PkceSession = {
-    env,
-    domain: cfg.domain,
-    client_id: cfg.client_id,
+    domain: AUTH_CONFIG.domain,
+    client_id: AUTH_CONFIG.client_id,
     redirect_uri: REDIRECT_URI,
     code_verifier: codeVerifier,
     state,
@@ -152,7 +135,6 @@ export function buildAuthorizeUrl(
 export async function exchangeCode(
   codeOrUrl: string,
   state?: string,
-  env: keyof typeof ENV_CONFIGS = "prod",
   verifierOverride?: string
 ): Promise<TokensData> {
   let code = codeOrUrl.trim();
@@ -169,9 +151,9 @@ export async function exchangeCode(
   }
 
   let codeVerifier = verifierOverride;
-  let domain: string = ENV_CONFIGS[env].domain;
-  let clientId: string = ENV_CONFIGS[env].client_id;
-  let redirectUri = REDIRECT_URI;
+  let domain: string = AUTH_CONFIG.domain;
+  let clientId: string = AUTH_CONFIG.client_id;
+  let redirectUri: string = REDIRECT_URI;
 
   const sessPath = getSessionFilePath();
   if (!codeVerifier && fs.existsSync(sessPath)) {
@@ -239,8 +221,8 @@ export async function refreshTokens(existing?: TokensData): Promise<TokensData> 
     throw new Error("No refresh_token found. Please log in using 'jumbo-mcp login'.");
   }
 
-  const domain = tokens?.domain || ENV_CONFIGS.prod.domain;
-  const clientId = tokens?.client_id || ENV_CONFIGS.prod.client_id;
+  const domain = tokens?.domain || AUTH_CONFIG.domain;
+  const clientId = tokens?.client_id || AUTH_CONFIG.client_id;
   const tokenUrl = `https://${domain}/oauth/token`;
 
   const payload = {
@@ -326,11 +308,11 @@ function openInBrowser(url: string) {
   }
 }
 
-export async function loginCli(env: keyof typeof ENV_CONFIGS = "prod"): Promise<void> {
-  const { url } = buildAuthorizeUrl(env);
+export async function loginCli(): Promise<void> {
+  const { url } = buildAuthorizeUrl();
 
   console.log("\n" + "=".repeat(70));
-  console.log("🚀 JUMBO MCP — AUTHENTICATION");
+  console.log("🚀 JUMBO MCP - AUTHENTICATION");
   console.log("=".repeat(70));
   console.log("\nOpening your browser to log in to Jumbo...");
   console.log(`\nIf the browser does not open automatically, visit this URL:\n\n${url}\n`);
@@ -346,7 +328,7 @@ export async function loginCli(env: keyof typeof ENV_CONFIGS = "prod"): Promise<
   console.log("1. Sign in to your Jumbo account in the browser.");
   console.log("2. When finished, the browser will attempt to redirect to:");
   console.log("   jumbo://callbacks/login?code=XXXX&state=YYYY");
-  console.log("   (The browser might show 'Address invalid' or 'Cannot open' — that's normal!)");
+  console.log("   (The browser might show 'Address invalid' or 'Cannot open' - that is normal!)");
   console.log("3. Copy the full address from your browser's address bar and paste it below.\n");
 
   const rl = readline.createInterface({
@@ -369,7 +351,7 @@ export async function loginCli(env: keyof typeof ENV_CONFIGS = "prod"): Promise<
 
   console.log("\n🔄 Exchanging code for permanent tokens...");
   try {
-    const tokens = await exchangeCode(redirectInput, undefined, env);
+    const tokens = await exchangeCode(redirectInput);
     console.log("🎉 Successfully authenticated!");
     console.log(`📁 Tokens saved to: ${getTokensFilePath()}`);
 
@@ -379,7 +361,7 @@ export async function loginCli(env: keyof typeof ENV_CONFIGS = "prod"): Promise<
     if (custId) console.log(`👤 Customer ID: ${custId}`);
     if (email) console.log(`📧 Account:     ${email}`);
 
-    console.log("\nYou're all set! You can now use jumbo-mcp in your AI assistant.");
+    console.log("\nYou are all set! You can now use jumbo-mcp in your AI assistant.");
   } catch (err: any) {
     console.error(`❌ Login failed: ${err.message}`);
     process.exit(1);

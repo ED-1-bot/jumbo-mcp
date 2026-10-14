@@ -4,20 +4,18 @@
 [![MCP](https://img.shields.io/badge/MCP-1.0.0-green.svg)](https://modelcontextprotocol.io/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 
-A Model Context Protocol (MCP) server for **Jumbo Supermarkten** — the second-largest supermarket chain in the Netherlands.
+A Model Context Protocol (MCP) server for **Jumbo Supermarkten**, the second-largest supermarket chain in the Netherlands.
 
 This server enables AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw, etc.) to securely access your personal Jumbo account to fetch **digital store receipts (*kassabonnen*)**, itemized prices, discounts, Extra's loyalty points balance, and active shopping lists.
 
 ---
 
-## Why this MCP is Different: Permanent Mobile OAuth
+## Authentication
 
-Most supermarket integrations rely on brittle web scrapers or temporary browser cookies that expire every few weeks and get blocked by Cloudflare/Akamai bot-shields.
-
-**`jumbo-mcp` replicates the official Jumbo mobile app (`com.icemobile.jumboclient`) Auth0 PKCE flow**:
-* **1-Time Login:** You log in once via the official Jumbo authentication page.
-* **Permanent Refresh Token:** Auth0 issues a permanent refresh token stored securely on your machine.
-* **Zero Maintenance:** The server automatically refreshes its 24-hour access token in the background. You never have to copy cookies or solve CAPTCHAs again!
+`jumbo-mcp` implements the official Jumbo mobile app Auth0 PKCE flow:
+* **One-time Login:** Authenticate once via the official Jumbo login page.
+* **Refresh Token:** Auth0 issues a persistent refresh token stored securely on your local machine.
+* **Automatic Refresh:** The server automatically refreshes access tokens in the background as needed.
 
 ---
 
@@ -119,4 +117,4 @@ npm run build
 
 ## License
 
-MIT License — Copyright (c) 2026 Robert Schulze Dieckhoff
+MIT License - Copyright (c) 2026 Robert Schulze Dieckhoff

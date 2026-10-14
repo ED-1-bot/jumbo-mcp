@@ -10,7 +10,6 @@ export interface TokensData {
 }
 
 export interface PkceSession {
-  env: string;
   domain: string;
   client_id: string;
   redirect_uri: string;

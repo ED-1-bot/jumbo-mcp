@@ -241,7 +241,7 @@ async function main() {
   const cmd = args[0]?.toLowerCase();
 
   if (cmd === "login") {
-    await loginCli("prod");
+    await loginCli();
   } else if (cmd === "status") {
     await showStatus();
   } else {
