@@ -4,7 +4,7 @@
 [![MCP](https://img.shields.io/badge/MCP-1.0.0-green.svg)](https://modelcontextprotocol.io/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 
-A Model Context Protocol (MCP) server for **Jumbo Supermarkten**, the second-largest supermarket chain in the Netherlands.
+A Model Context Protocol (MCP) server for **Jumbo Supermarkten**.
 
 This server enables AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw, etc.) to securely access your personal Jumbo account to fetch **digital store receipts (*kassabonnen*)**, itemized prices, discounts, Extra's loyalty points balance, and active shopping lists.
 
