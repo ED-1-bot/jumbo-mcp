@@ -22,3 +22,7 @@ __pycache__/
 # OS artifacts
 .DS_Store
 Thumbs.db
+
+# Postman collections (local only)
+postman/
+*.postman_collection.json

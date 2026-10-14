@@ -117,20 +117,6 @@ npm run build
 * `npm run status`: Verify live API connection and token status
 * `npm run build`: Compile TypeScript to `dist/`
 
----
-
-## Postman Collection
-
-A Postman collection is included in [`postman/jumbo.postman_collection.json`](postman/jumbo.postman_collection.json).
-
-It covers over 200 Jumbo GraphQL operations and REST endpoints:
-* Digital receipts and purchase history
-* Product catalog search and alternatives
-* Extra's loyalty balance and profile details
-* Store locator and opening hours
-* Active shopping lists and checkout sessions
-
-To use it in Postman, import the JSON file and set the `token` variable to your Auth0 access token.
 
 ---
 

@@ -23,8 +23,7 @@ A Model Context Protocol (MCP) server for **Jumbo Supermarkten**, providing secu
 * `jumbo_search_products`: Search the entire live Jumbo supermarket grocery catalog by keyword. Returns matching products, current prices, promotional tags, unit prices, product URLs, and SKUs with optional price sorting (`PRICE_ASC` / `PRICE_DESC`).
 * `jumbo_get_product_recommendations`: Retrieve product recommendations, brand alternatives, and cross-sell suggestions by SKU or search query, or fetch current weekly promotional deals.
 
-### 3. Developer Resources & Postman Collection
-* **Postman Collection Included:** [`postman/jumbo.postman_collection.json`](postman/jumbo.postman_collection.json) containing over 200 GraphQL operations and REST endpoints for direct testing and API exploration.
+### 3. Developer Resources & CLI Utilities
 * **CLI Utility Commands:**
   * `npm run login`: Interactive terminal login wizard.
   * `npm run status`: Live connectivity check, token validation, and Extra's balance verification.
