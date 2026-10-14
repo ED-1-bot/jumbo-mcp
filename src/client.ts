@@ -756,7 +756,7 @@ async function resolveCoordinates(
     try {
       const res = await fetch(
         `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ", Netherlands")}&format=json&limit=1`,
-        { headers: { "User-Agent": "jumbo-mcp/1.0.0" } }
+        { headers: { "User-Agent": "jumbo-mcp/0.1.0" } }
       );
       if (res.ok) {
         const data: any = await res.json();

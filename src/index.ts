@@ -65,7 +65,7 @@ async function showStatus(): Promise<void> {
 async function startServer(): Promise<void> {
   const server = new McpServer({
     name: "jumbo-mcp",
-    version: "1.0.0",
+    version: "0.1.0",
   });
 
   // Tool: Login (Agent auth verification)

@@ -1,18 +1,19 @@
-# Jumbo MCP Server v1.0.0 Release Notes
+# Jumbo MCP Server v0.1.0 Release Notes
 
 A Model Context Protocol (MCP) server for **Jumbo Supermarkten**, providing secure access to digital store receipts (*kassabonnen*), loyalty points, store locators, grocery product search, and recommendations for AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw, and autonomous agents).
 
 ---
 
-## What's New in v1.0.0
+## What's New in v0.1.0
 
 ### 1. Zero-Maintenance Auth0 Authentication
 * **Auth0 PKCE Flow:** Official OAuth2 PKCE login flow via `npx jumbo-mcp login`.
 * **Persistent Refresh Token:** Generates a secure, persistent refresh token stored locally in `~/.config/jumbo-mcp/tokens.json`.
 * **Automatic Token Lifecycle:** Automatically refreshes 24-hour access tokens in the background on demand.
-* **Headless & VPS Gateway Support:** Can be deployed to remote servers and Docker containers by simply providing the `JUMBO_REFRESH_TOKEN` environment variable.
+* **Headless & VPS Gateway Support:** Can be deployed to remote servers and Docker containers with volume mounts and `JUMBO_REFRESH_TOKEN` / `JUMBO_TOKEN`.
 
-### 2. Full Suite of MCP Tools
+### 2. Full Suite of 10 MCP Tools
+* `jumbo_login`: Authenticate and verify active connection, returning user loyalty identity.
 * `jumbo_get_profile`: Retrieve customer loyalty profile, name, customer ID, Extra's card details, and digital receipt preferences.
 * `jumbo_list_receipts`: List recent store receipts (*kassabonnen*) with timestamps, store locations, and transaction IDs.
 * `jumbo_get_receipt_details`: Retrieve full itemized line items, unit prices, discounts, totals, payment methods, and VAT breakdowns for a specific receipt.
