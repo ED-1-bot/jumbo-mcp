@@ -10,6 +10,7 @@ import {
   getTokensFilePath,
   loadTokens,
   loginCli,
+  refreshTokens,
 } from "./auth.js";
 
 // Load local .env if present
@@ -18,11 +19,18 @@ dotenv.config();
 const client = new JumboClient();
 
 async function showStatus(): Promise<void> {
-  const tokens = loadTokens();
+  let tokens = loadTokens();
+  if (!tokens && process.env.JUMBO_REFRESH_TOKEN) {
+    try {
+      tokens = await refreshTokens();
+    } catch {
+      // Ignore
+    }
+  }
   if (!tokens) {
     console.log("❌ Not logged in. No tokens found.");
     console.log(`Expected tokens at: ${getTokensFilePath()}`);
-    console.log("\nRun 'npx jumbo-mcp login' to authenticate.");
+    console.log("\nRun 'npx jumbo-mcp login' or set JUMBO_REFRESH_TOKEN.");
     return;
   }
 
