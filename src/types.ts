@@ -84,3 +84,23 @@ export interface ProductRecommendationsResult {
   crossSells?: RecommendedProduct[];
   promotions?: RecommendedProduct[];
 }
+
+export interface ProductSearchItem {
+  sku: string;
+  title: string;
+  url: string;
+  price: number;
+  price_formatted: string;
+  promo_price: number | null;
+  promo_price_formatted: string | null;
+  unit_price: number | null;
+  unit_price_formatted: string | null;
+  is_available: boolean;
+  promotions: string[];
+}
+
+export interface ProductSearchResult {
+  query: string;
+  total_count: number;
+  products: ProductSearchItem[];
+}

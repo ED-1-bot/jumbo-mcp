@@ -30,6 +30,7 @@ This server enables AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw
 | `jumbo_get_balance` | Get live Jumbo Extra's loyalty points balance. | None |
 | `jumbo_get_shopping_list` | Retrieve the customer's active shopping list items. | None |
 | `jumbo_search_stores` | Search nearby Jumbo supermarket stores by city, address, or geographic coordinates (latitude, longitude). Returns address, distance, opening hours, and facilities. | `query` (optional), `latitude` (optional), `longitude` (optional) |
+| `jumbo_search_products` | Search the entire Jumbo supermarket grocery catalog by keyword. Returns matching products, current prices, promotional discounts, unit prices, product links, and SKUs. | `query` (required), `sort` (optional: `'PRICE_ASC'` or `'PRICE_DESC'`), `limit` (default: `20`, max: `30`) |
 | `jumbo_get_product_recommendations` | Get product recommendations, alternatives, and cross-sell suggestions by SKU or search keyword, or retrieve current weekly promotional recommendations. | `sku` (optional), `query` (optional), `promotions_only` (optional, default: `false`) |
 
 ---
@@ -96,7 +97,7 @@ If hosting on a remote server (e.g. Docker, systemd, or remote gateway):
 * Copy your `~/.config/jumbo-mcp/tokens.json` to the server, OR
 * Pass the environment variable directly:
   ```bash
-  JUMBO_REFRESH_TOKEN="v1.MVxY..."
+  JUMBO_REFRESH_TOKEN="your_refresh_token_here"
   ```
 
 ---

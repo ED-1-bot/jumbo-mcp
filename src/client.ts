@@ -10,6 +10,8 @@ import {
   StoreInfo,
   ProductRecommendationsResult,
   RecommendedProduct,
+  ProductSearchItem,
+  ProductSearchResult,
 } from "./types.js";
 
 const GRAPHQL_URL = "https://www.jumbo.com/api/graphql";
@@ -602,6 +604,79 @@ export class JumboClient {
       sourceProduct: sourceProduct || null,
       alternatives,
       crossSells,
+    };
+  }
+
+  async searchProducts(options: {
+    query: string;
+    sort?: "PRICE_ASC" | "PRICE_DESC";
+    limit?: number;
+  }): Promise<ProductSearchResult> {
+    const q = `
+    query SearchProductsByKeyword($input: ProductSearchInput!) {
+      searchProducts(input: $input) {
+        count
+        products {
+          title
+          sku
+          link
+          price {
+            price
+            promoPrice
+            pricePerUnit {
+              price
+            }
+          }
+          availability {
+            isAvailable
+          }
+          promotions {
+            tags {
+              text
+            }
+          }
+        }
+      }
+    }
+    `;
+
+    const input: Record<string, any> = {
+      searchType: "KEYWORD",
+      searchTerms: options.query,
+    };
+    if (options.sort) {
+      input.sort = options.sort;
+    }
+
+    const res = await this.executeGraphql<any>(q, { input }, "JUMBO_WEB-loyalty");
+    const rawProducts = res?.searchProducts?.products || [];
+    const limit = options.limit ?? 25;
+
+    const products: ProductSearchItem[] = rawProducts.slice(0, limit).map((p: any) => {
+      const priceCents = p.price?.price ?? 0;
+      const promoCents = p.price?.promoPrice ?? null;
+      const unitCents = p.price?.pricePerUnit?.price ?? null;
+      const tags: string[] = p.promotions?.flatMap((pr: any) => pr.tags?.map((t: any) => t.text) || []) || [];
+
+      return {
+        sku: p.sku,
+        title: p.title,
+        url: p.link ? `https://www.jumbo.com${p.link}` : "",
+        price: priceCents,
+        price_formatted: `€${(priceCents / 100).toFixed(2)}`,
+        promo_price: promoCents,
+        promo_price_formatted: promoCents !== null ? `€${(promoCents / 100).toFixed(2)}` : null,
+        unit_price: unitCents,
+        unit_price_formatted: unitCents !== null ? `€${(unitCents / 100).toFixed(2)}` : null,
+        is_available: p.availability?.isAvailable ?? true,
+        promotions: tags,
+      };
+    });
+
+    return {
+      query: options.query,
+      total_count: res?.searchProducts?.count ?? products.length,
+      products,
     };
   }
 }

@@ -307,6 +307,46 @@ async function startServer(): Promise<void> {
     }
   );
 
+  // Tool: Search Products
+  server.tool(
+    "jumbo_search_products",
+    "Search the entire Jumbo supermarket grocery catalog by keyword. Returns matching products with prices, active discounts, unit prices, web links, and SKUs.",
+    {
+      query: z
+        .string()
+        .describe("Grocery product keyword to search for (e.g. 'koffie', 'havermelk', 'biologische bananen')"),
+      sort: z
+        .enum(["PRICE_ASC", "PRICE_DESC"])
+        .optional()
+        .describe("Optional sort order: 'PRICE_ASC' (cheapest first) or 'PRICE_DESC' (most expensive first)"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(30)
+        .default(20)
+        .describe("Maximum number of products to return (default: 20, max: 30)"),
+    },
+    async ({ query, sort, limit }) => {
+      try {
+        const result = await client.searchProducts({ query, sort, limit });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Error: ${error.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
