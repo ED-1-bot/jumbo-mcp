@@ -80,13 +80,17 @@ export function loadTokens(): TokensData | null {
 }
 
 export function saveTokens(tokens: TokensData): void {
-  const filePath = getTokensFilePath();
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(tokens, null, 2), "utf-8");
   try {
-    fs.chmodSync(filePath, 0o600);
+    const filePath = getTokensFilePath();
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(tokens, null, 2), "utf-8");
+    try {
+      fs.chmodSync(filePath, 0o600);
+    } catch {
+      // Ignore permissions failure on Windows
+    }
   } catch {
-    // Ignore permissions failure on Windows
+    // Ignore if running in a read-only environment
   }
 }
 
