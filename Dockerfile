@@ -19,6 +19,4 @@ RUN npm install --omit=dev
 
 COPY --from=builder /app/dist ./dist
 
-ENV JUMBO_REFRESH_TOKEN=""
-
 ENTRYPOINT ["node", "dist/index.js"]
