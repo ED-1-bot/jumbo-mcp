@@ -68,6 +68,44 @@ async function startServer(): Promise<void> {
     version: "1.0.0",
   });
 
+  // Tool: Login (Agent auth verification)
+  server.tool(
+    "jumbo_login",
+    "Check authentication status or establish session with Jumbo. The MCP server uses persistent pre-configured Auth0 tokens, so this verifies active connection and returns user loyalty identity.",
+    {},
+    async () => {
+      try {
+        const profile = await client.getProfile();
+        const balance = await client.getBalance();
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  status: "authenticated",
+                  authenticated: true,
+                  message: "Successfully authenticated with Jumbo.",
+                  customer_name: profile.name,
+                  customer_id: profile.customer_id,
+                  loyalty_card: profile.loyalty_card_number,
+                  points: balance.balance,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Error: ${error.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
   // Tool: Get Profile
   server.tool(
     "jumbo_get_profile",
