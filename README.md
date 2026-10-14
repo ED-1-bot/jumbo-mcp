@@ -29,6 +29,8 @@ This server enables AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw
 | `jumbo_search_receipts` | Search for specific grocery items purchased across recent receipts by keyword (e.g. `'havermelk'`, `'bio ei'`, `'skyr'`). | `query` (required), `max_receipts` (default: `10`) |
 | `jumbo_get_balance` | Get live Jumbo Extra's loyalty points balance. | None |
 | `jumbo_get_shopping_list` | Retrieve the customer's active shopping list items. | None |
+| `jumbo_search_stores` | Search nearby Jumbo supermarket stores by city, address, or geographic coordinates (latitude, longitude). Returns address, distance, opening hours, and facilities. | `query` (optional), `latitude` (optional), `longitude` (optional) |
+| `jumbo_get_product_recommendations` | Get product recommendations, alternatives, and cross-sell suggestions by SKU or search keyword, or retrieve current weekly promotional recommendations. | `sku` (optional), `query` (optional), `promotions_only` (optional, default: `false`) |
 
 ---
 
@@ -112,6 +114,21 @@ npm run build
 * `npm run login`: Run authentication CLI
 * `npm run status`: Verify live API connection and token status
 * `npm run build`: Compile TypeScript to `dist/`
+
+---
+
+## Postman Collection
+
+A Postman collection is included in [`postman/jumbo.postman_collection.json`](postman/jumbo.postman_collection.json).
+
+It covers over 200 Jumbo GraphQL operations and REST endpoints extracted from the mobile application:
+* Digital receipts and purchase history
+* Product catalog search and alternatives
+* Extra's loyalty balance and profile details
+* Store locator and opening hours
+* Active shopping lists and checkout sessions
+
+To use it in Postman, import the JSON file and set the `token` variable to your Auth0 access token.
 
 ---
 

@@ -232,6 +232,81 @@ async function startServer(): Promise<void> {
     }
   );
 
+  // Tool: Search Stores
+  server.tool(
+    "jumbo_search_stores",
+    "Search nearby Jumbo supermarket stores by city name, address, or geographic coordinates (latitude, longitude). Returns address, distance, opening hours, and facilities.",
+    {
+      query: z
+        .string()
+        .optional()
+        .describe("Dutch city, address, or postal code (e.g. 'Amsterdam', 'Utrecht', '1011NG')"),
+      latitude: z.number().optional().describe("Optional latitude (e.g. 52.3702)"),
+      longitude: z.number().optional().describe("Optional longitude (e.g. 4.8952)"),
+    },
+    async ({ query, latitude, longitude }) => {
+      try {
+        const result = await client.searchStores({ query, latitude, longitude });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Error: ${error.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Tool: Product Recommendations
+  server.tool(
+    "jumbo_get_product_recommendations",
+    "Get product recommendations, alternatives, and cross-sell suggestions for a product by SKU or search query, or retrieve current weekly promotional recommendations.",
+    {
+      sku: z
+        .string()
+        .optional()
+        .describe("Product SKU (e.g. '293407STK') to find direct brand alternatives and substitutes"),
+      query: z
+        .string()
+        .optional()
+        .describe("Search product keyword (e.g. 'havermelk', 'yoghurt', 'koffie') to find top products and their alternatives"),
+      promotions_only: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Set to true to retrieve current weekly promotional recommendations"),
+    },
+    async ({ sku, query, promotions_only }) => {
+      try {
+        const result = await client.getProductRecommendations({
+          sku,
+          query,
+          promotionsOnly: promotions_only,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Error: ${error.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

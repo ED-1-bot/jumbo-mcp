@@ -7,6 +7,9 @@ import {
   ReceiptDetails,
   ReceiptItem,
   ReceiptOverviewItem,
+  StoreInfo,
+  ProductRecommendationsResult,
+  RecommendedProduct,
 } from "./types.js";
 
 const GRAPHQL_URL = "https://www.jumbo.com/api/graphql";
@@ -384,4 +387,286 @@ export class JumboClient {
     const data = await this.executeGraphql<any>(q, undefined, "JUMBO_WEB-loyalty");
     return data?.shoppingList || { isActive: false, items: [] };
   }
+
+  async searchStores(options?: {
+    query?: string;
+    latitude?: number;
+    longitude?: number;
+  }): Promise<{
+    searched_location: { latitude: string; longitude: string };
+    total_found: number;
+    stores: StoreInfo[];
+  }> {
+    const coords = await resolveCoordinates(
+      options?.query,
+      options?.latitude,
+      options?.longitude
+    );
+
+    const q = `
+    query GetStoreList($input: StoresByCoordinatesInput!) {
+      storesByCoordinates(input: $input) {
+        stores {
+          storeId
+          name
+          distance
+          location {
+            address {
+              street
+              houseNumber
+              city
+              postalCode
+            }
+          }
+          openingHours {
+            monday { opensAt closesAt }
+            tuesday { opensAt closesAt }
+            wednesday { opensAt closesAt }
+            thursday { opensAt closesAt }
+            friday { opensAt closesAt }
+            saturday { opensAt closesAt }
+            sunday { opensAt closesAt }
+          }
+          facilities {
+            locationType
+          }
+        }
+        totalCount
+      }
+    }
+    `;
+
+    const data = await this.executeGraphql<any>(
+      q,
+      { input: { latitude: coords.lat, longitude: coords.lon } },
+      "JUMBO_WEB-loyalty"
+    );
+
+    const rawStores = data?.storesByCoordinates?.stores || [];
+    const stores: StoreInfo[] = rawStores.map((s: any) => ({
+      storeId: s.storeId,
+      name: s.name,
+      distanceKm: s.distance ? parseFloat(s.distance) : null,
+      address: {
+        street: s.location?.address?.street,
+        houseNumber: s.location?.address?.houseNumber,
+        city: s.location?.address?.city,
+        postalCode: s.location?.address?.postalCode,
+      },
+      openingHours: s.openingHours,
+      locationType: s.facilities?.locationType,
+    }));
+
+    return {
+      searched_location: { latitude: coords.lat, longitude: coords.lon },
+      total_found: data?.storesByCoordinates?.totalCount ?? stores.length,
+      stores,
+    };
+  }
+
+  async getProductRecommendations(options?: {
+    sku?: string;
+    query?: string;
+    promotionsOnly?: boolean;
+  }): Promise<ProductRecommendationsResult> {
+    const promotionsOnly = options?.promotionsOnly ?? false;
+
+    if (promotionsOnly || (!options?.sku && !options?.query)) {
+      const promoQ = `
+      query getPromotions {
+        promotionTab(id: "actieprijs") {
+          runtimes {
+            sections {
+              promotions {
+                products {
+                  title
+                  sku
+                  price { price promoPrice }
+                }
+              }
+            }
+          }
+        }
+      }
+      `;
+      const data = await this.executeGraphql<any>(promoQ, {}, "JUMBO_WEB-loyalty");
+      const proms: RecommendedProduct[] = [];
+      const runtimes = data?.promotionTab?.runtimes || [];
+      for (const rt of runtimes) {
+        for (const sec of rt.sections || []) {
+          for (const p of sec.promotions || []) {
+            for (const pr of p.products || []) {
+              if (pr && pr.sku) {
+                proms.push({
+                  sku: pr.sku,
+                  title: pr.title,
+                  price: pr.price ? { price: pr.price.price, promoPrice: pr.price.promoPrice } : null,
+                });
+              }
+            }
+          }
+        }
+      }
+      return {
+        alternatives: [],
+        promotions: proms.slice(0, 15),
+      };
+    }
+
+    let targetSku = options?.sku;
+    let sourceProduct: RecommendedProduct | undefined;
+
+    if (!targetSku && options?.query) {
+      const searchQ = `
+      query SearchProductsByKeyword($input: ProductSearchInput!) {
+        searchProducts(input: $input) {
+          products {
+            title
+            sku
+            price { price promoPrice }
+            promotions { tags { text } }
+          }
+        }
+      }
+      `;
+      const searchRes = await this.executeGraphql<any>(
+        searchQ,
+        { input: { searchType: "KEYWORD", searchTerms: options.query } },
+        "JUMBO_WEB-loyalty"
+      );
+      const found = searchRes?.searchProducts?.products || [];
+      if (found.length > 0) {
+        targetSku = found[0].sku;
+        sourceProduct = {
+          sku: found[0].sku,
+          title: found[0].title,
+          price: found[0].price ? { price: found[0].price.price, promoPrice: found[0].price.promoPrice } : null,
+          promotions: found[0].promotions?.flatMap((p: any) => p.tags?.map((t: any) => t.text) || []) || [],
+        };
+      } else {
+        return {
+          sourceProduct: null,
+          alternatives: [],
+          crossSells: [],
+        };
+      }
+    }
+
+    if (!targetSku) {
+      return { alternatives: [] };
+    }
+
+    const detailQ = `
+    query ProductDetail($sku: String!) {
+      product(sku: $sku) {
+        title
+        sku
+        price { price promoPrice }
+        alternatives {
+          title
+          sku
+          price { price promoPrice }
+        }
+        crossSells {
+          title
+          sku
+          price { price promoPrice }
+        }
+      }
+    }
+    `;
+    const detailRes = await this.executeGraphql<any>(detailQ, { sku: targetSku }, "JUMBO_WEB-loyalty");
+    const prod = detailRes?.product;
+
+    if (prod && !sourceProduct) {
+      sourceProduct = {
+        sku: prod.sku,
+        title: prod.title,
+        price: prod.price ? { price: prod.price.price, promoPrice: prod.price.promoPrice } : null,
+      };
+    }
+
+    const alternatives: RecommendedProduct[] = (prod?.alternatives || []).map((a: any) => ({
+      sku: a.sku,
+      title: a.title,
+      price: a.price ? { price: a.price.price, promoPrice: a.price.promoPrice } : null,
+    }));
+
+    const crossSells: RecommendedProduct[] = (prod?.crossSells || []).map((c: any) => ({
+      sku: c.sku,
+      title: c.title,
+      price: c.price ? { price: c.price.price, promoPrice: c.price.promoPrice } : null,
+    }));
+
+    return {
+      sourceProduct: sourceProduct || null,
+      alternatives,
+      crossSells,
+    };
+  }
+}
+
+const DUTCH_CITIES: Record<string, { lat: number; lon: number }> = {
+  amsterdam: { lat: 52.3676, lon: 4.9041 },
+  rotterdam: { lat: 51.9244, lon: 4.4777 },
+  "den haag": { lat: 52.0705, lon: 4.3007 },
+  "'s-gravenhage": { lat: 52.0705, lon: 4.3007 },
+  utrecht: { lat: 52.0907, lon: 5.1214 },
+  eindhoven: { lat: 51.4416, lon: 5.4697 },
+  groningen: { lat: 53.2194, lon: 6.5665 },
+  tilburg: { lat: 51.5719, lon: 5.0672 },
+  almere: { lat: 52.3702, lon: 5.2144 },
+  breda: { lat: 51.5719, lon: 4.7683 },
+  nijmegen: { lat: 51.8126, lon: 5.8372 },
+  enschede: { lat: 52.2215, lon: 6.8937 },
+  haarlem: { lat: 52.3874, lon: 4.6462 },
+  arnhem: { lat: 51.9851, lon: 5.8987 },
+  amersfoort: { lat: 52.1561, lon: 5.3878 },
+  apeldoorn: { lat: 52.2112, lon: 5.9699 },
+  "den bosch": { lat: 51.6978, lon: 5.3037 },
+  "'s-hertogenbosch": { lat: 51.6978, lon: 5.3037 },
+  maastricht: { lat: 50.8514, lon: 5.691 },
+  leiden: { lat: 52.1601, lon: 4.497 },
+  dordrecht: { lat: 51.8133, lon: 4.6901 },
+  zoetermeer: { lat: 52.0607, lon: 4.494 },
+  zwolle: { lat: 52.5168, lon: 6.083 },
+  deventer: { lat: 52.255, lon: 6.162 },
+  delft: { lat: 52.0116, lon: 4.3571 },
+  alkmaar: { lat: 52.6324, lon: 4.7534 },
+  venlo: { lat: 51.37, lon: 6.1724 },
+  leeuwarden: { lat: 53.2012, lon: 5.7999 },
+};
+
+async function resolveCoordinates(
+  query?: string,
+  latitude?: number,
+  longitude?: number
+): Promise<{ lat: string; lon: string }> {
+  if (latitude !== undefined && longitude !== undefined) {
+    return { lat: String(latitude), lon: String(longitude) };
+  }
+  if (query && query.trim()) {
+    const q = query.trim().toLowerCase();
+    if (DUTCH_CITIES[q]) {
+      return {
+        lat: DUTCH_CITIES[q].lat.toFixed(4),
+        lon: DUTCH_CITIES[q].lon.toFixed(4),
+      };
+    }
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ", Netherlands")}&format=json&limit=1`,
+        { headers: { "User-Agent": "jumbo-mcp/1.0.0" } }
+      );
+      if (res.ok) {
+        const data: any = await res.json();
+        if (Array.isArray(data) && data.length > 0 && data[0].lat && data[0].lon) {
+          return { lat: String(data[0].lat), lon: String(data[0].lon) };
+        }
+      }
+    } catch {
+      // Fallback
+    }
+  }
+  return { lat: "52.3676", lon: "4.9041" };
 }

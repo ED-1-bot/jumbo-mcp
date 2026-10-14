@@ -49,3 +49,38 @@ export interface LoyaltyProfile {
   digital_receipt_enabled: boolean;
   digital_stamps_opt_in: boolean;
 }
+
+export interface StoreAddress {
+  street?: string;
+  houseNumber?: string;
+  city?: string;
+  postalCode?: string;
+}
+
+export interface StoreInfo {
+  storeId: string;
+  name: string;
+  distanceKm: number | null;
+  address: StoreAddress;
+  openingHours?: Record<string, { opensAt?: string; closesAt?: string }>;
+  locationType?: string;
+}
+
+export interface ProductPrice {
+  price: number;
+  promoPrice?: number | null;
+}
+
+export interface RecommendedProduct {
+  sku: string;
+  title: string;
+  price?: ProductPrice | null;
+  promotions?: string[];
+}
+
+export interface ProductRecommendationsResult {
+  sourceProduct?: RecommendedProduct | null;
+  alternatives: RecommendedProduct[];
+  crossSells?: RecommendedProduct[];
+  promotions?: RecommendedProduct[];
+}
