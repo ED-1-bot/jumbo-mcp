@@ -276,33 +276,58 @@ export class JumboClient {
 
   async getReceiptDetails(transactionId: string): Promise<ReceiptDetails> {
     const q = `
-    query GetDigitalReceipt {
-      getDigitalReceipt(transactionId: "${transactionId}") {
-        transactionId
+    query GetDigitalReceipt($transactionId: String) {
+      receipt(transactionId: $transactionId) {
+        receiptImage {
+          image
+          type
+          receiptPoints {
+            earned
+            newBalance
+            oldBalance
+            redeemed
+          }
+        }
+        store {
+          name
+          location {
+            address {
+              city
+              houseNumber
+              postalCode
+              street
+            }
+          }
+        }
         purchaseEndOn
         receiptSource
-        store {
-          storeId
-          name
+        customerDetails {
+          customerId
+          loyaltyCard {
+            number
+          }
         }
-        pointBalance
-        image
       }
     }
     `;
-    const data = await this.executeGraphql<any>(q, undefined, "JUMBO_WEB-orders");
-    const receipt = data?.getDigitalReceipt;
+    const data = await this.executeGraphql<any>(
+      q,
+      { transactionId },
+      "JUMBO_WEB-orders"
+    );
+    const receipt = data?.receipt;
     if (!receipt) {
       throw new Error(`Receipt not found for transactionId: ${transactionId}`);
     }
 
-    const parsed = this.parseReceiptDoc(receipt.image || "{}");
+    const rawImage = receipt.receiptImage?.image || "{}";
+    const parsed = this.parseReceiptDoc(rawImage);
     return {
-      transaction_id: receipt.transactionId,
-      datetime: receipt.purchaseEndOn,
-      store: receipt.store?.name,
-      store_id: receipt.store?.storeId,
-      points_earned: receipt.pointBalance,
+      transaction_id: transactionId,
+      datetime: receipt.purchaseEndOn || "",
+      store: receipt.store?.name || "",
+      store_id: "",
+      points_earned: receipt.receiptImage?.receiptPoints?.earned ?? null,
       total: parsed.total,
       payment_method: parsed.payment_method,
       items_count: parsed.items.length,
