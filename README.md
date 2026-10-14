@@ -12,7 +12,7 @@ This server enables AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw
 
 ## Authentication
 
-`jumbo-mcp` implements the official Jumbo mobile app Auth0 PKCE flow:
+`jumbo-mcp` implements the Auth0 PKCE flow:
 * **One-time Login:** Authenticate once via the official Jumbo login page.
 * **Refresh Token:** Auth0 issues a persistent refresh token stored securely on your local machine.
 * **Automatic Refresh:** The server automatically refreshes access tokens in the background as needed.
@@ -121,7 +121,7 @@ npm run build
 
 A Postman collection is included in [`postman/jumbo.postman_collection.json`](postman/jumbo.postman_collection.json).
 
-It covers over 200 Jumbo GraphQL operations and REST endpoints extracted from the mobile application:
+It covers over 200 Jumbo GraphQL operations and REST endpoints:
 * Digital receipts and purchase history
 * Product catalog search and alternatives
 * Extra's loyalty balance and profile details

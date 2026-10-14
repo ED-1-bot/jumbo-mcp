@@ -1,8 +1,8 @@
 {
  "info": {
-  "name": "Jumbo App API (com.icemobile.jumboclient)",
+  "name": "Jumbo API",
   "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-  "description": "Extracted from Jumbo mobile app (com.icemobile.jumboclient). GraphQL router and REST proxies.\nSet base_url and token (Auth0 bearer)."
+  "description": "Jumbo GraphQL router and REST proxies.\nSet base_url and token (Auth0 bearer)."
  },
  "auth": {
   "type": "bearer",
