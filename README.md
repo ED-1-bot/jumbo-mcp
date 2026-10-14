@@ -23,6 +23,7 @@ This server enables AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw
 
 | Tool | Description | Parameters |
 | :--- | :--- | :--- |
+| `jumbo_login` | Verify active connection and authentication status with Jumbo. Returns loyalty user identity and points balance. | None |
 | `jumbo_get_profile` | Get customer loyalty profile, name, customer ID, Extra's card details, and digital receipt preferences. | None |
 | `jumbo_list_receipts` | List recent store receipts (*kassabonnen*) with timestamps, store location, and transaction IDs. | `page` (default: `0`), `page_size` (default: `10`, max: `30`) |
 | `jumbo_get_receipt_details` | Retrieve full itemized line items, unit prices, discounts, total, payment method, and VAT breakdown for a specific receipt. | `transaction_id` (required) |
