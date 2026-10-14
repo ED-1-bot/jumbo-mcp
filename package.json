@@ -1,0 +1,49 @@
+{
+  "name": "jumbo-mcp",
+  "version": "1.0.0",
+  "description": "Model Context Protocol (MCP) server for Jumbo Supermarkten - Digital receipts, loyalty points, and grocery management",
+  "main": "dist/index.js",
+  "bin": {
+    "jumbo-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc && chmod +x dist/index.js",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "login": "tsx src/index.ts login",
+    "status": "tsx src/index.ts status",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "jumbo",
+    "supermarket",
+    "receipts",
+    "groceries",
+    "ai-agent",
+    "claude",
+    "cursor"
+  ],
+  "author": "Robert Schulze Dieckhoff",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.5.0",
+    "dotenv": "^16.4.7",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
