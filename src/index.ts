@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import * as dotenv from "dotenv";
-import { JumboClient } from "./client.js";
+import { JumboClient, JumboShoppingListError } from "./client.js";
 import {
   decodeJwtPayload,
   getTokensFilePath,
@@ -17,6 +17,37 @@ import {
 dotenv.config();
 
 const client = new JumboClient();
+
+/**
+ * Shape an MCP tool error. Shopping-list union errors carry the API's own
+ * `reason`/`errorMessage`; surface both verbatim, never as a generic message.
+ */
+function toolError(error: any) {
+  if (error instanceof JumboShoppingListError) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              status: "error",
+              error: "ShoppingListError",
+              reason: error.reason,
+              errorMessage: error.errorMessage,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+      isError: true,
+    };
+  }
+  return {
+    content: [{ type: "text" as const, text: `Error: ${error.message}` }],
+    isError: true,
+  };
+}
 
 async function showStatus(): Promise<void> {
   let tokens = loadTokens();
@@ -256,7 +287,7 @@ async function startServer(): Promise<void> {
   // Tool: Get Shopping List
   server.tool(
     "jumbo_get_shopping_list",
-    "Get the user's current active Jumbo shopping list.",
+    "Get the user's Jumbo shopping list ('lijstje'): whether it is active and every item (id, term, sku, completed).",
     {},
     async () => {
       try {
@@ -270,10 +301,7 @@ async function startServer(): Promise<void> {
           ],
         };
       } catch (error: any) {
-        return {
-          content: [{ type: "text", text: `Error: ${error.message}` }],
-          isError: true,
-        };
+        return toolError(error);
       }
     }
   );
@@ -389,6 +417,229 @@ async function startServer(): Promise<void> {
           content: [{ type: "text", text: `Error: ${error.message}` }],
           isError: true,
         };
+      }
+    }
+  );
+
+  // Tool: Add Shopping List Items (WRITE)
+  server.tool(
+    "jumbo_add_shopping_list_items",
+    "Add one or more free-text items to the user's Jumbo shopping list (e.g. ['eieren']). " +
+      "This WRITES to the user's real Jumbo account. If the list is inactive it is activated first " +
+      "(set ensure_active=false to skip). Never touches the basket, checkout, orders or payments.",
+    {
+      items: z
+        .array(z.string().min(1))
+        .min(1)
+        .describe("One or more free-text item names to add, e.g. ['eieren', 'melk']"),
+      ensure_active: z
+        .boolean()
+        .default(true)
+        .describe("Activate the shopping list first if it is inactive (default true)"),
+      dedupe: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Skip terms already on the list (case-insensitive, trimmed). Set false to allow duplicates (default true)"
+        ),
+    },
+    async ({ items, ensure_active, dedupe }) => {
+      try {
+        const result = await client.addShoppingListItems(items, {
+          ensureActive: ensure_active,
+          dedupe,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  status: "ok",
+                  is_active: result.isActive,
+                  activated_first: result.activated,
+                  added: result.added,
+                  skipped: result.skipped,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Set Shopping List Active (WRITE)
+  server.tool(
+    "jumbo_set_shopping_list_active",
+    "Activate or deactivate the user's Jumbo shopping list ('lijstje'). " +
+      "This WRITES to the user's real Jumbo account; it does not add or remove items.",
+    {
+      active: z.boolean().describe("true to activate the shopping list, false to deactivate"),
+    },
+    async ({ active }) => {
+      try {
+        const isActive = await client.setShoppingListActive(active);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ status: "ok", is_active: isActive }, null, 2),
+            },
+          ],
+        };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Remove Shopping List Items (WRITE)
+  server.tool(
+    "jumbo_remove_shopping_list_items",
+    "Remove one or more items from the user's Jumbo shopping list by item id (ids come from jumbo_get_shopping_list). " +
+      "This WRITES to the user's real Jumbo account. Shopping list only.",
+    {
+      item_ids: z
+        .array(z.string().min(1))
+        .min(1)
+        .describe("One or more shopping-list item ids to remove"),
+    },
+    async ({ item_ids }) => {
+      try {
+        const removed = await client.removeShoppingListItems(item_ids);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify({ status: "ok", removed }, null, 2) },
+          ],
+        };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Complete / un-complete a shopping list item (WRITE)
+  server.tool(
+    "jumbo_set_shopping_list_item_completed",
+    "Tick an item on the user's Jumbo shopping list off (completed=true) or back on (completed=false). " +
+      "This WRITES to the user's real Jumbo account.",
+    {
+      item_id: z.string().min(1).describe("Shopping-list item id (from jumbo_get_shopping_list)"),
+      completed: z.boolean().describe("true to tick off, false to un-tick"),
+    },
+    async ({ item_id, completed }) => {
+      try {
+        const items = await client.setShoppingListItemCompleted(item_id, completed);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify({ status: "ok", items }, null, 2) },
+          ],
+        };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Get Basket (read-only)
+  server.tool(
+    "jumbo_get_basket",
+    "Read-only view of the current Jumbo basket: lines with quantity, unit price, line total, promotions applied, and the basket subtotal. " +
+      "Uses the GraphQL ActiveBasket operation. No basket writes, no checkout, no order, no payment operations.",
+    {},
+    async () => {
+      try {
+        const basket = await client.getBasket();
+        return { content: [{ type: "text", text: JSON.stringify(basket, null, 2) }] };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Get Deposits (read-only)
+  server.tool(
+    "jumbo_get_deposits",
+    "Read statiegeld (deposit) information for one order: the deposit catalogue and the deposits returned on that order, with the returned total. " +
+      "Requires an order_id — Jumbo's returned-deposits query is order-scoped.",
+    {
+      order_id: z.string().min(1).describe("Order id (from the order history / receipts)"),
+    },
+    async ({ order_id }) => {
+      try {
+        const deposits = await client.getDeposits(order_id);
+        return { content: [{ type: "text", text: JSON.stringify(deposits, null, 2) }] };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Get Stamps (read-only)
+  server.tool(
+    "jumbo_get_stamps",
+    "Read the user's digital stamps: per-campaign stamp counts, active saving (spaar) campaigns, and the buying-stamps balance.",
+    {},
+    async () => {
+      try {
+        const stamps = await client.getStamps();
+        return { content: [{ type: "text", text: JSON.stringify(stamps, null, 2) }] };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Promo Digest (read-only)
+  server.tool(
+    "jumbo_get_promo_digest",
+    "Answer \"of the things I actually buy, what is on offer right now?\". " +
+      "Mines recent receipts for purchase frequency, resolves each frequent item to a current " +
+      "assortment product, and reports the offer price (was/now), discount, promo type, validity " +
+      "window and unit price for everything currently promoted. Read-only: no writes, no basket, " +
+      "no checkout, no order or payment operations.",
+    {
+      days: z
+        .number()
+        .int()
+        .positive()
+        .max(365)
+        .default(90)
+        .describe("How many days of receipts to mine (default 90)"),
+      min_times: z
+        .number()
+        .int()
+        .positive()
+        .default(2)
+        .describe("Minimum times a product must have been bought to count as frequent (default 2)"),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(100)
+        .default(25)
+        .describe("Maximum offers to return (default 25)"),
+      category: z
+        .string()
+        .optional()
+        .describe("Optional category filter (case-insensitive substring of the product category)"),
+    },
+    async ({ days, min_times, limit, category }) => {
+      try {
+        const digest = await client.getPromoDigest({
+          days,
+          minTimes: min_times,
+          limit,
+          category,
+        });
+        return { content: [{ type: "text", text: JSON.stringify(digest, null, 2) }] };
+      } catch (error: any) {
+        return toolError(error);
       }
     }
   );

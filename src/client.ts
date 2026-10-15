@@ -12,9 +12,51 @@ import {
   RecommendedProduct,
   ProductSearchItem,
   ProductSearchResult,
+  ShoppingList,
+  ShoppingListItem,
+  ShoppingListItemInput,
+  EditShoppingListItemsInput,
+  Basket,
+  DepositsResult,
+  StampsResult,
+  PromoDigest,
+  PromoDigestEntry,
+  DigestPromotion,
+  DigestAccountOffer,
 } from "./types.js";
 
 const GRAPHQL_URL = "https://www.jumbo.com/api/graphql";
+
+/**
+ * Raised when a shopping-list mutation returns the `ShoppingListError` union
+ * member. Carries the API's `reason` and `errorMessage` verbatim so callers (and
+ * the MCP tool layer) can surface them instead of reporting a false success.
+ */
+/**
+ * Generic union error. Jumbo's write/read unions return their failure member as
+ * a *successful* GraphQL response (HTTP 200, no top-level `errors`), so callers
+ * must branch on `__typename` and raise. Carries the API's own values.
+ */
+export class JumboApiError extends Error {
+  readonly typename: string;
+  readonly reason: string;
+  readonly errorMessage: string;
+
+  constructor(typename: string, reason: string, errorMessage: string) {
+    super(`Jumbo ${typename} [${reason}]: ${errorMessage}`);
+    this.name = "JumboApiError";
+    this.typename = typename;
+    this.reason = reason;
+    this.errorMessage = errorMessage;
+  }
+}
+
+export class JumboShoppingListError extends JumboApiError {
+  constructor(reason: string, errorMessage: string) {
+    super("ShoppingListError", reason, errorMessage);
+    this.name = "JumboShoppingListError";
+  }
+}
 
 export class JumboClient {
   private userAgent =
@@ -398,21 +440,194 @@ export class JumboClient {
     return data?.getBalance || { balance: 0 };
   }
 
-  async getShoppingList(): Promise<{ isActive: boolean; items: Array<{ id: string }> }> {
+  /**
+   * The GraphQL unions return `ShoppingListError` as a *successful* response
+   * (no top-level `errors`), so a mutation that failed semantically still looks
+   * like a 200. Always branch on `__typename` and raise, never swallow.
+   */
+  private raiseIfShoppingListError(value: any, operation: string): void {
+    if (value && value.__typename === "ShoppingListError") {
+      throw new JumboShoppingListError(
+        value.reason || "UNKNOWN",
+        value.errorMessage || `Jumbo rejected ${operation}.`
+      );
+    }
+  }
+
+  private mapShoppingListItems(raw: any[]): ShoppingListItem[] {
+    return (raw || []).map((i: any) => ({
+      id: i.id ?? null,
+      term: i.term ?? "",
+      sku: i.sku ?? null,
+      completed: Boolean(i.completed),
+    }));
+  }
+
+  async getShoppingList(): Promise<ShoppingList> {
     const q = `
     query GetShoppingList {
       shoppingList {
+        __typename
         ... on ShoppingList {
           isActive
           items {
             id
+            term
+            sku
+            completed
           }
+        }
+        ... on ShoppingListError {
+          reason
+          errorMessage
         }
       }
     }
     `;
     const data = await this.executeGraphql<any>(q, undefined, "JUMBO_WEB-loyalty");
-    return data?.shoppingList || { isActive: false, items: [] };
+    const list = data?.shoppingList;
+    this.raiseIfShoppingListError(list, "reading the shopping list");
+    return {
+      isActive: Boolean(list?.isActive),
+      items: this.mapShoppingListItems(list?.items),
+    };
+  }
+
+  /**
+   * Add or edit shopping-list items via `mutation EditShoppingListItems`.
+   * Returns the resulting item set as echoed by the API.
+   */
+  async editShoppingListItems(
+    input: EditShoppingListItemsInput
+  ): Promise<ShoppingListItem[]> {
+    if (!input.items || input.items.length === 0) {
+      throw new Error("editShoppingListItems requires at least one item.");
+    }
+    const q = `
+    mutation EditShoppingListItems($input: EditShoppingListItemsInput!) {
+      editShoppingListItems(input: $input) {
+        __typename
+        ... on EditShoppingListItemsResult {
+          items {
+            id
+            term
+            sku
+            completed
+          }
+        }
+        ... on ShoppingListError {
+          reason
+          errorMessage
+        }
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(q, { input }, "JUMBO_WEB-loyalty");
+    const result = data?.editShoppingListItems;
+    this.raiseIfShoppingListError(result, "editing shopping-list items");
+    if (result?.__typename !== "EditShoppingListItemsResult") {
+      throw new JumboShoppingListError(
+        "UNEXPECTED_RESULT",
+        `Unexpected result type '${result?.__typename ?? "null"}' from editShoppingListItems.`
+      );
+    }
+    return this.mapShoppingListItems(result.items);
+  }
+
+  /**
+   * Convenience wrapper for the common "add eggs" case: one or more free-text
+   * terms, optionally auto-activating an inactive list first.
+   */
+  async addShoppingListItems(
+    terms: string[],
+    options?: {
+      sku?: string | null;
+      completed?: boolean;
+      ensureActive?: boolean;
+      /** Skip terms already on the list (case-insensitive, trimmed). Default true. */
+      dedupe?: boolean;
+    }
+  ): Promise<{
+    isActive: boolean;
+    added: ShoppingListItem[];
+    activated: boolean;
+    skipped: string[];
+  }> {
+    const cleaned = (terms || [])
+      .map((t) => String(t).trim())
+      .filter((t) => t.length > 0);
+    if (cleaned.length === 0) {
+      throw new Error("addShoppingListItems requires at least one non-empty term.");
+    }
+
+    const ensureActive = options?.ensureActive ?? true;
+    const dedupe = options?.dedupe ?? true;
+
+    const before = await this.getShoppingList();
+    let activated = false;
+    if (ensureActive && !before.isActive) {
+      await this.setShoppingListActive(true);
+      activated = true;
+    }
+
+    const existing = new Set(before.items.map((i) => i.term.trim().toLowerCase()));
+    const skipped: string[] = [];
+    const toAdd: string[] = [];
+    for (const term of cleaned) {
+      const key = term.toLowerCase();
+      const alreadyThere =
+        existing.has(key) || toAdd.some((t) => t.toLowerCase() === key);
+      if (dedupe && alreadyThere) {
+        skipped.push(term);
+        continue;
+      }
+      toAdd.push(term);
+    }
+
+    const added = toAdd.length
+      ? await this.editShoppingListItems({
+          items: toAdd.map((term) => ({
+            term,
+            ...(options?.sku ? { sku: options.sku } : {}),
+            completed: options?.completed ?? false,
+          })),
+        })
+      : [];
+
+    const list = await this.getShoppingList();
+    return { isActive: list.isActive, added, activated, skipped };
+  }
+
+  /** Activate/deactivate the shopping list via `mutation toggleShoppingList`. */
+  async setShoppingListActive(active: boolean): Promise<boolean> {
+    const q = `
+    mutation toggleShoppingList($input: ToggleShoppingListInput!) {
+      toggleShoppingList(input: $input) {
+        __typename
+        ... on ShoppingListState {
+          isActive
+        }
+        ... on ShoppingListError {
+          reason
+          errorMessage
+        }
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(
+      q,
+      { input: { active } },
+      "JUMBO_WEB-loyalty"
+    );
+    const result = data?.toggleShoppingList;
+    this.raiseIfShoppingListError(result, "toggling the shopping list");
+    if (result?.__typename !== "ShoppingListState") {
+      throw new JumboShoppingListError(
+        "UNEXPECTED_RESULT",
+        `Unexpected result type '${result?.__typename ?? "null"}' from toggleShoppingList.`
+      );
+    }
+    return Boolean(result.isActive);
   }
 
   async searchStores(options?: {
@@ -704,6 +919,628 @@ export class JumboClient {
       products,
     };
   }
+
+  /**
+   * Keyword product search used by the promo digest. Selects the offer-bearing
+   * fields `SearchProductDetails` proves exist on `Product` (price, unit price,
+   * promotions with validity + volume discounts) — nothing invented.
+   */
+  private async searchProductForDigest(term: string): Promise<any | null> {
+    const q = `
+    query PromoDigestSearch($input: ProductSearchInput!) {
+      searchProducts(input: $input) {
+        count
+        products {
+          sku
+          title
+          link
+          category: rootCategory
+          price {
+            price
+            promoPrice
+            pricePerUnit {
+              price
+              unit
+            }
+          }
+          availability {
+            isAvailable
+          }
+          promotions {
+            id
+            group
+            tags {
+              text
+            }
+            start {
+              date
+            }
+            end {
+              date
+            }
+            durationTexts {
+              shortTitle
+            }
+            volumeDiscounts {
+              discount
+              volume
+            }
+            maxPromotionQuantity
+          }
+        }
+      }
+    }
+    `;
+    const res = await this.executeGraphql<any>(
+      q,
+      { input: { searchType: "KEYWORD", searchTerms: term } },
+      "JUMBO_WEB-loyalty"
+    );
+    const products = res?.searchProducts?.products;
+    return Array.isArray(products) && products.length > 0 ? products[0] : null;
+  }
+
+  /** Personalised, account-level offers (not tied to one product). */
+  private async getAccountOffers(): Promise<DigestAccountOffer[]> {
+    const q = `
+    query PromoDigestCustomerPromotions {
+      getCustomerPromotions {
+        id
+        active
+        canBeRedeemed
+        description
+        expirationDate
+        eurosDiscount
+        percentageDiscount
+        minimumSpent
+        startDate
+        title
+      }
+    }
+    `;
+    const res = await this.executeGraphql<any>(q, undefined, "JUMBO_WEB-loyalty");
+    const list = res?.getCustomerPromotions;
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((p: any) => p && p.active !== false)
+      .slice(0, 25)
+      .map((p: any) => ({
+        id: p.id ?? null,
+        title: p.title ?? null,
+        description: p.description ?? null,
+        euros_discount: p.eurosDiscount ?? null,
+        percentage_discount: p.percentageDiscount ?? null,
+        minimum_spent: p.minimumSpent ?? null,
+        expires_on: p.expirationDate ?? null,
+      }));
+  }
+
+  /** Shape one mined term into a digest row. Pure mapping — no I/O. */
+  private toDigestEntry(term: string, timesBought: number, p: any): PromoDigestEntry {
+    const rawPromos = Array.isArray(p?.promotions) ? p.promotions : [];
+    const promoTypes: string[] = [];
+    const promotions: DigestPromotion[] = rawPromos.map((pr: any) => {
+      const tags: string[] = (pr?.tags || [])
+        .map((t: any) => t?.text)
+        .filter((t: any): t is string => typeof t === "string" && t.length > 0);
+      for (const t of tags) if (!promoTypes.includes(t)) promoTypes.push(t);
+      return {
+        id: pr?.id ?? null,
+        group: pr?.group ?? null,
+        tags,
+        short_title: pr?.durationTexts?.shortTitle ?? null,
+        starts_on: pr?.start?.date ?? null,
+        ends_on: pr?.end?.date ?? null,
+        volume_discounts: (pr?.volumeDiscounts || []).map((v: any) => ({
+          discount: v?.discount ?? null,
+          volume: v?.volume ?? null,
+        })),
+        max_promotion_quantity: pr?.maxPromotionQuantity ?? null,
+      };
+    });
+
+    const was = p?.price?.price ?? null;
+    const now = p?.price?.promoPrice ?? null;
+    const discount = was !== null && now !== null && now < was ? was - now : null;
+    const pct = discount !== null && was ? Math.round((discount / was) * 100) : null;
+    const starts = promotions.map((x) => x.starts_on).filter((d): d is string => !!d).sort();
+    const ends = promotions.map((x) => x.ends_on).filter((d): d is string => !!d).sort();
+
+    return {
+      term,
+      times_bought: timesBought,
+      product: p
+        ? {
+            sku: p.sku ?? "",
+            title: p.title ?? "",
+            url: p.link ? `https://www.jumbo.com${p.link}` : "",
+            category: p.category ?? null,
+          }
+        : null,
+      was_price: was,
+      now_price: now,
+      discount,
+      discount_percent: pct,
+      unit_price: p?.price?.pricePerUnit?.price ?? null,
+      unit: p?.price?.pricePerUnit?.unit ?? null,
+      promo_types: promoTypes,
+      promotions,
+      is_available: p?.availability?.isAvailable ?? false,
+      valid_from: starts.length > 0 ? starts[0] : null,
+      valid_until: ends.length > 0 ? ends[ends.length - 1] : null,
+    };
+  }
+
+  /**
+   * Small jittered pause between digest API calls (120-200ms). The digest issues
+   * back-to-back requests — up to one per scanned receipt plus one search per
+   * frequent term — so this keeps the mine from hammering Jumbo's API in a burst.
+   * Timing only; results stay deterministic.
+   */
+  private async digestPause(): Promise<void> {
+    const ms = 120 + Math.floor(Math.random() * 80);
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * "Of the things I actually buy, what is on offer right now?"
+   *
+   * Read-only and deterministic: mines recent receipts for purchase frequency,
+   * resolves each frequent basket term to a current assortment product via
+   * `searchProducts`, and reports the offer price/validity the product carries.
+   * Side-effect free — it never writes, never builds a basket, never checks out.
+   */
+  async getPromoDigest(
+    options: {
+      days?: number;
+      minTimes?: number;
+      limit?: number;
+      category?: string;
+      /** Hard cap on receipt-detail fetches (one request per receipt). */
+      maxReceipts?: number;
+    } = {}
+  ): Promise<PromoDigest> {
+    const days = options.days ?? 90;
+    const minTimes = options.minTimes ?? 2;
+    const limit = options.limit ?? 25;
+    const category = options.category?.trim() ? options.category.trim().toLowerCase() : null;
+    const maxReceipts = Math.max(1, options.maxReceipts ?? 40);
+    const notes: string[] = [];
+
+    // ---- 1. mine recent receipts for what the customer actually buys
+    const cutoff = Date.now() - days * 86_400_000;
+    const PAGE = 25;
+    const receipts: ReceiptOverviewItem[] = [];
+    let available = 0;
+    for (let page = 0; page < 10 && receipts.length < maxReceipts; page++) {
+      let overview: { total_results: number; receipts: ReceiptOverviewItem[] };
+      try {
+        overview = await this.listReceipts(page, PAGE);
+      } catch (e: any) {
+        notes.push(`receipt lookup stopped at page ${page}: ${e.message}`);
+        break;
+      }
+      available = overview.total_results ?? available;
+      if (!overview.receipts.length) break;
+      let stop = false;
+      for (const r of overview.receipts) {
+        const t = Date.parse(r.datetime);
+        if (!Number.isNaN(t) && t < cutoff) {
+          stop = true;
+          break;
+        }
+        receipts.push(r);
+        if (receipts.length >= maxReceipts) {
+          stop = true;
+          break;
+        }
+      }
+      if (stop) break;
+    }
+
+    // ---- 2. count distinct basket terms across those receipts
+    const counts = new Map<string, { display: string; n: number }>();
+    for (const r of receipts) {
+      let d: ReceiptDetails;
+      try {
+        await this.digestPause();
+        d = await this.getReceiptDetails(r.transaction_id);
+      } catch {
+        continue;
+      }
+      for (const item of d.items) {
+        const key = normalizeTerm(item.name);
+        if (!key) continue;
+        const existing = counts.get(key);
+        if (existing) existing.n++;
+        else counts.set(key, { display: item.name.trim(), n: 1 });
+      }
+    }
+
+    const frequent = [...counts.values()]
+      .filter((e) => e.n >= minTimes)
+      .sort((a, b) => b.n - a.n || a.display.localeCompare(b.display));
+
+    // ---- 3. resolve each frequent term and keep the ones currently on offer
+    const matched: PromoDigestEntry[] = [];
+    const notMatched: string[] = [];
+    for (const f of frequent) {
+      let product: any = null;
+      try {
+        await this.digestPause();
+        product = await this.searchProductForDigest(f.display);
+      } catch {
+        product = null;
+      }
+      const entry = this.toDigestEntry(f.display, f.n, product);
+      if (category) {
+        const cat = (entry.product?.category || "").toLowerCase();
+        if (!cat.includes(category)) continue; // out of the requested category
+      }
+      if (entry.product && entry.promo_types.length > 0) matched.push(entry);
+      else notMatched.push(f.display);
+    }
+
+    matched.sort(
+      (a, b) =>
+        b.times_bought - a.times_bought ||
+        (b.discount ?? 0) - (a.discount ?? 0) ||
+        a.term.localeCompare(b.term)
+    );
+    const limited = matched.slice(0, limit);
+
+    // ---- 4. supplementary account-level offers
+    let accountOffers: DigestAccountOffer[] = [];
+    try {
+      accountOffers = await this.getAccountOffers();
+    } catch (e: any) {
+      notes.push(`customer promotions unavailable: ${e.message}`);
+    }
+
+    notes.push(
+      `Resolution is one keyword search per frequent term; the top hit is used. ${frequent.length} frequent term(s) scanned.`
+    );
+    notes.push(
+      `Receipt mining is capped at the ${maxReceipts} most recent receipt(s) inside ${days} day(s).`
+    );
+
+    return {
+      days,
+      min_times: minTimes,
+      limit,
+      category,
+      matched: limited,
+      not_matched: notMatched,
+      matched_count: limited.length,
+      not_matched_count: notMatched.length,
+      account_offers: accountOffers,
+      scanned: {
+        receipts_scanned: receipts.length,
+        receipts_available: available,
+        distinct_terms: counts.size,
+        frequent_terms: frequent.length,
+      },
+      notes,
+    };
+  }
+
+  /** Generic union unwrap: raise on the `*Error` member, enforce the success member. */
+  private unwrapUnion<T = any>(
+    value: any,
+    successTypes: string[],
+    operation: string
+  ): T {
+    const tn = value?.__typename;
+    if (typeof tn === "string" && tn.endsWith("Error")) {
+      throw new JumboApiError(
+        tn,
+        value.reason ?? "UNKNOWN",
+        value.errorMessage ?? value.message ?? `Jumbo rejected ${operation}.`
+      );
+    }
+    if (typeof tn !== "string" || !successTypes.includes(tn)) {
+      throw new JumboApiError(
+        tn ?? "Unknown",
+        "UNEXPECTED_RESULT",
+        `Unexpected result type '${tn ?? "null"}' from ${operation}.`
+      );
+    }
+    return value as T;
+  }
+
+  /** Remove shopping-list items by id. `ShoppingListItemIdsResult | ShoppingListError`. */
+  async removeShoppingListItems(itemIds: string[]): Promise<string[]> {
+    const ids = (itemIds || []).map((s) => String(s).trim()).filter(Boolean);
+    if (ids.length === 0) {
+      throw new Error("removeShoppingListItems requires at least one item id.");
+    }
+    const q = `
+    mutation RemoveShoppingListItems($input: RemoveShoppingListItemsInput!) {
+      removeShoppingListItems(input: $input) {
+        __typename
+        ... on ShoppingListItemIdsResult {
+          itemIds
+        }
+        ... on ShoppingListError {
+          reason
+          errorMessage
+        }
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(
+      q,
+      { input: { shoppingListItemIds: ids } },
+      "JUMBO_WEB-loyalty"
+    );
+    const result = data?.removeShoppingListItems;
+    this.raiseIfShoppingListError(result, "removing shopping-list items");
+    if (result?.__typename !== "ShoppingListItemIdsResult") {
+      throw new JumboShoppingListError(
+        "UNEXPECTED_RESULT",
+        `Unexpected result type '${result?.__typename ?? "null"}' from removeShoppingListItems.`
+      );
+    }
+    return result.itemIds ?? [];
+  }
+
+  /**
+   * Tick an item off (or back on). Looks the item up first so the edit payload
+   * carries the server's own `term`/`sku` alongside `completed`.
+   */
+  async setShoppingListItemCompleted(
+    itemId: string,
+    completed: boolean
+  ): Promise<ShoppingListItem[]> {
+    const list = await this.getShoppingList();
+    const item = list.items.find((i) => i.id === itemId);
+    if (!item) {
+      throw new JumboShoppingListError(
+        "ITEM_NOT_FOUND",
+        `No shopping-list item with id '${itemId}'.`
+      );
+    }
+    const input: ShoppingListItemInput = {
+      term: item.term,
+      completed,
+      ...(item.id ? { id: item.id } : {}),
+      ...(item.sku ? { sku: item.sku } : {}),
+    };
+    return this.editShoppingListItems({ items: [input] });
+  }
+
+  /** Read-only active basket via the GraphQL `ActiveBasket` operation. */
+  async getBasket(): Promise<Basket> {
+    const q = `
+    query ActiveBasket($orderChannel: OrderChannel!) {
+      activeBasket {
+        __typename
+        ... on ActiveBasketResult {
+          basket {
+            id
+            totalProductCount
+            lines {
+              sku
+              id
+              quantity
+              details {
+                title
+                price {
+                  price
+                  promoPrice
+                }
+                promotions {
+                  tags {
+                    text
+                  }
+                }
+              }
+            }
+            calculation {
+              totals {
+                itemSubtotal {
+                  amount
+                  currency
+                }
+                totalToPay {
+                  amount
+                  currency
+                }
+              }
+            }
+          }
+        }
+        ... on BasketError {
+          reason
+          errorMessage
+        }
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(
+      q,
+      { orderChannel: "MOBILE_WEB" },
+      "JUMBO_WEB-basket"
+    );
+    const res = this.unwrapUnion<any>(
+      data?.activeBasket,
+      ["ActiveBasketResult"],
+      "reading the active basket"
+    );
+    const b = res.basket;
+    const lines = (b?.lines ?? []).map((l: any) => {
+      const d = l.details ?? {};
+      const unit = d.price?.price ?? null;
+      const promo = d.price?.promoPrice ?? null;
+      const qty = l.quantity ?? 0;
+      const effective = promo ?? unit;
+      return {
+        sku: l.sku ?? null,
+        id: l.id ?? null,
+        title: d.title ?? "",
+        quantity: qty,
+        unit_price: unit,
+        promo_price: promo,
+        line_total: effective !== null ? effective * qty : null,
+        promotions: (d.promotions ?? []).flatMap(
+          (p: any) => (p.tags ?? []).map((t: any) => t.text).filter(Boolean)
+        ),
+      };
+    });
+    const totals = b?.calculation?.totals;
+    return {
+      id: b?.id ?? null,
+      total_product_count:
+        b?.totalProductCount ?? lines.reduce((a: number, l: any) => a + l.quantity, 0),
+      lines,
+      subtotal: totals?.itemSubtotal?.amount ?? null,
+      total_to_pay: totals?.totalToPay?.amount ?? null,
+      currency: totals?.itemSubtotal?.currency ?? null,
+    };
+  }
+
+  /**
+   * Deposits (statiegeld) for a single order. `GetDeposits` requires an orderId:
+   * `deposits` is the global catalogue, `returnedDeposits(orderId:)` is per-order.
+   */
+  async getDeposits(orderId: string): Promise<DepositsResult> {
+    const id = String(orderId ?? "").trim();
+    if (!id) throw new Error("getDeposits requires an orderId.");
+    const q = `
+    query GetDeposits($orderId: String!) {
+      deposits {
+        sku
+        description
+        category
+        chargeType
+        unitPrice {
+          amount
+          currency
+        }
+      }
+      returnedDeposits(orderId: $orderId) {
+        __typename
+        ... on ReturnedDepositsResponseSuccess {
+          returnedDeposits {
+            sku
+            price {
+              amount
+              currency
+            }
+            returnedByCustomerQuantity
+          }
+          returnedDepositsTotalAmount {
+            amount
+            currency
+          }
+        }
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(q, { orderId: id }, "JUMBO_WEB-orders");
+
+    // The error member's fields are not in the teardown, so only __typename is
+    // selected above; surface it verbatim rather than guessing at a message.
+    const returned = data?.returnedDeposits;
+    if (returned?.__typename && returned.__typename !== "ReturnedDepositsResponseSuccess") {
+      throw new JumboApiError(
+        returned.__typename,
+        returned.reason ?? "UNKNOWN",
+        returned.errorMessage ?? `returnedDeposits returned '${returned.__typename}'.`
+      );
+    }
+
+    return {
+      order_id: id,
+      deposits: (data?.deposits ?? []).map((d: any) => ({
+        sku: d.sku,
+        description: d.description ?? "",
+        category: d.category ?? null,
+        charge_type: d.chargeType ?? null,
+        unit_price: d.unitPrice?.amount ?? null,
+        currency: d.unitPrice?.currency ?? null,
+      })),
+      returned: {
+        items: (returned?.returnedDeposits ?? []).map((r: any) => ({
+          sku: r.sku,
+          unit_price: r.price?.amount ?? null,
+          currency: r.price?.currency ?? null,
+          returned_quantity: r.returnedByCustomerQuantity ?? null,
+        })),
+        total: returned?.returnedDepositsTotalAmount?.amount ?? null,
+        currency: returned?.returnedDepositsTotalAmount?.currency ?? null,
+      },
+    };
+  }
+
+  /** Digital stamps: per-campaign stamp counts, active saving campaigns, buying-stamp balance. */
+  async getStamps(): Promise<StampsResult> {
+    const q = `
+    query GetStamps {
+      getDigitalStamps {
+        digitalStamps {
+          campaignId
+          numberStamps
+        }
+      }
+      getCampaigns(active: true, campaignType: "SAVING") {
+        active
+        id
+        title
+        campaignCode
+        campaignData {
+          numberOfStampsPerCard
+          stampsNeededForRedemption {
+            stamps
+            subTitle
+          }
+          stampType
+        }
+      }
+      getBuyingStampsBalance {
+        monetaryValue
+        amountOfStamps
+        amountOfStampsPerCard
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(q, undefined, "JUMBO_WEB-loyalty");
+    return {
+      digital_stamps: (data?.getDigitalStamps?.digitalStamps ?? []).map((s: any) => ({
+        campaign_id: s.campaignId,
+        number_stamps: s.numberStamps ?? 0,
+      })),
+      saving_campaigns: (data?.getCampaigns ?? []).map((c: any) => ({
+        id: c.id,
+        title: c.title ?? "",
+        campaign_code: c.campaignCode ?? null,
+        active: Boolean(c.active),
+        stamps_needed_for_redemption:
+          c.campaignData?.stampsNeededForRedemption?.stamps ?? null,
+        number_of_stamps_per_card: c.campaignData?.numberOfStampsPerCard ?? null,
+        stamp_type: c.campaignData?.stampType ?? null,
+        starts_at: null,
+        ends_at: null,
+      })),
+      buying_stamps: data?.getBuyingStampsBalance
+        ? {
+            monetary_value: data.getBuyingStampsBalance.monetaryValue ?? null,
+            amount_of_stamps: data.getBuyingStampsBalance.amountOfStamps ?? null,
+            amount_of_stamps_per_card:
+              data.getBuyingStampsBalance.amountOfStampsPerCard ?? null,
+          }
+        : null,
+    };
+  }
+}
+
+/** Receipt terms are compared lowercase, trimmed, ignoring the printed promo marker. */
+function normalizeTerm(name: string): string {
+  return (name || "")
+    .replace(/\s+p\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 const DUTCH_CITIES: Record<string, { lat: number; lon: number }> = {

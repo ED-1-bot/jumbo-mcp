@@ -6,7 +6,7 @@
 
 A Model Context Protocol (MCP) server for **Jumbo Supermarkten**.
 
-This server enables AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw, etc.) to securely access your personal Jumbo account to fetch **digital store receipts (*kassabonnen*)**, itemized prices, discounts, Extra's loyalty points balance, and active shopping lists.
+This server enables AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw, etc.) to securely access your personal Jumbo account to fetch **digital store receipts (*kassabonnen*)**, itemized prices, discounts, Extra's loyalty points balance, and to read and **write your shopping list (*lijstje*)**.
 
 ---
 
@@ -29,14 +29,93 @@ This server enables AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw
 | `jumbo_get_receipt_details` | Retrieve full itemized line items, unit prices, discounts, total, payment method, and VAT breakdown for a specific receipt. | `transaction_id` (required) |
 | `jumbo_search_receipts` | Search for specific grocery items purchased across recent receipts by keyword (e.g. `'havermelk'`, `'bio ei'`, `'skyr'`). | `query` (required), `max_receipts` (default: `10`) |
 | `jumbo_get_balance` | Get live Jumbo Extra's loyalty points balance. | None |
-| `jumbo_get_shopping_list` | Retrieve the customer's active shopping list items. | None |
+| `jumbo_get_shopping_list` | Retrieve the customer's shopping list: `isActive` plus every item (`id`, `term`, `sku`, `completed`). | None |
+| `jumbo_add_shopping_list_items` | **Write.** Add one or more free-text items to the shopping list (e.g. `['eieren']`). Activates the list first when it is inactive; skips terms already present (case-insensitive). | `items` (required, `string[]`), `ensure_active` (default: `true`), `dedupe` (default: `true`) |
+| `jumbo_set_shopping_list_active` | **Write.** Activate or deactivate the shopping list. Adds/removes no items. | `active` (required, `boolean`) |
+| `jumbo_remove_shopping_list_items` | **Write.** Remove items by id (ids from `jumbo_get_shopping_list`). | `item_ids` (required, `string[]`) |
+| `jumbo_set_shopping_list_item_completed` | **Write.** Tick an item off (`completed: true`) or back on (`false`). | `item_id` (required), `completed` (required, `boolean`) |
+| `jumbo_get_basket` | **Read-only.** Current basket: lines with quantity, unit price, line total, promotions applied, and subtotal. Uses GraphQL `ActiveBasket`. No basket writes / checkout / order / payment. | None |
+| `jumbo_get_deposits` | **Read-only.** Statiegeld for one order: the deposit catalogue plus deposits returned on that order and the returned total. **Order-scoped — `order_id` is required.** | `order_id` (required) |
+| `jumbo_get_stamps` | **Read-only.** Digital stamps: per-campaign stamp counts, active saving (spaar) campaigns, buying-stamps balance. | None |
 | `jumbo_search_stores` | Search nearby Jumbo supermarket stores by city, address, or geographic coordinates (latitude, longitude). Returns address, distance, opening hours, and facilities. | `query` (optional), `latitude` (optional), `longitude` (optional) |
 | `jumbo_search_products` | Search the entire Jumbo supermarket grocery catalog by keyword. Returns matching products, current prices, promotional discounts, unit prices, product links, and SKUs. | `query` (required), `sort` (optional: `'PRICE_ASC'` or `'PRICE_DESC'`), `limit` (default: `20`, max: `30`) |
 | `jumbo_get_product_recommendations` | Get product recommendations, alternatives, and cross-sell suggestions by SKU or search keyword, or retrieve current weekly promotional recommendations. | `sku` (optional), `query` (optional), `promotions_only` (optional, default: `false`) |
+| `jumbo_get_promo_digest` | **Read-only.** "Of the things I actually buy, what is on offer right now?" Mines recent receipts for purchase frequency, resolves each frequent item to a current product, and reports offer price (was/now), discount, promo type, validity window and unit price, plus `matched_count` and a `not_matched` list. | `days` (default: `90`), `min_times` (default: `2`), `limit` (default: `25`), `category` (optional) |
 
 ---
 
-## Quickstart
+## Shopping list (write)
+
+The shopping list is the only write surface. Basket, checkout, order and payment operations are deliberately **not** implemented.
+
+### `jumbo_add_shopping_list_items`
+
+| | |
+| :--- | :--- |
+| GraphQL | `mutation EditShoppingListItems($input: EditShoppingListItemsInput!)` |
+| Input | `{ input: { items: [{ term: string, completed?: boolean, sku?: string, id?: string }] } }` |
+| Parameters | `items: string[]` (required, 1+ non-empty terms), `ensure_active?: boolean` (default `true`) |
+| Returns | `{ status: "ok", is_active, activated_first, added: ShoppingListItem[] }`. `added` is the API's echo of the items the mutation accepted — not a second read. |
+
+Behaviour:
+1. If `ensure_active` is true and the list is inactive, it calls `toggleShoppingList({ active: true })` first, then adds. `activated_first` reports whether that happened.
+2. Sends the trimmed terms as `{ term, completed: false }` — matching the app's own add payload (`[{ term, completed: false }]`).
+3. Then re-reads the list solely to report the current `is_active`. `added` is **the mutation's own echo** of the items it accepted (the API's response to `editShoppingListItems`), not a re-read of the list.
+
+> The `EditShoppingListItemsInput` / `ToggleShoppingListInput` field shapes (`{ items: [{ term, completed }] }`, `{ active }`) are **inferred** from the app's client-side call sites. The APK teardown confirms the operation names and the `ShoppingListItem` fragment fields, but not these input types. The first live call is the smoke test.
+
+### `jumbo_set_shopping_list_active`
+
+| | |
+| :--- | :--- |
+| GraphQL | `mutation toggleShoppingList($input: ToggleShoppingListInput!)` |
+| Input | `{ input: { active: boolean } }` |
+| Parameters | `active: boolean` (required) |
+| Returns | `{ status: "ok", is_active }` |
+
+### Dedupe on add
+
+`jumbo_add_shopping_list_items` **skips terms already on the list** (compared trimmed and case-insensitive) and reports them in `skipped`. Within a single call, repeated terms are collapsed to one. Set `dedupe: false` to restore the original duplicate-allowed behaviour.
+
+```json
+{ "status": "ok", "is_active": true, "activated_first": false,
+  "added": [ { "id": "3", "term": "BROOD", "sku": null, "completed": false } ],
+  "skipped": [ "eieren", "melk" ] }
+```
+
+### Remove, and tick off
+
+- `jumbo_remove_shopping_list_items` — `mutation RemoveShoppingListItems`, `{ input: { shoppingListItemIds: string[] } }` → `ShoppingListItemIdsResult.itemIds | ShoppingListError`.
+- `jumbo_set_shopping_list_item_completed` — reads the list, finds the item by id, then re-sends it with `completed` flipped. Unknown ids raise `ITEM_NOT_FOUND` without touching the API.
+
+### Failure modes
+
+The API returns shopping-list failures as a **union member** (`ShoppingListError`) inside an HTTP 200 response — not as a GraphQL top-level error. The client branches on `__typename` and raises; the tool returns an `isError` payload with the API's own values. The same pattern covers `BasketError` and `ReturnedDepositsError` via `JumboApiError`:
+
+```json
+{
+  "status": "error",
+  "error": "ShoppingListError",
+  "reason": "LIST_INACTIVE",
+  "errorMessage": "Shopping list is not active"
+}
+```
+
+A mutation/query is **never** reported as success unless it returned the expected success member. An unexpected member raises `UNEXPECTED_RESULT`. Credentials are never echoed into any error text.
+
+### What is *not* verified
+
+- `EditShoppingListItemsInput` / `ToggleShoppingListInput` / `RemoveShoppingListItemsInput` field shapes are **inferred** from the app's client-side call sites; the teardown confirms operation names and the `ShoppingListItem` fragment only.
+- `jumbo_get_basket` selects `basket.calculation` **without** the `voucherCodes` / `shippingCosts` arguments the app passes; whether the server accepts an argument-less `calculation` selection is unconfirmed until the first live call.
+- `ReturnedDepositsError`'s fields do not appear anywhere in the teardown, so only `__typename` is selected and surfaced.
+- `jumbo_get_stamps` merges `getDigitalStamps` + `getCampaigns` + `getBuyingStampsBalance` into one `GetStamps` operation; the app issues them separately, so the combined selection is unconfirmed.
+- `starts_at` / `ends_at` on saving campaigns are returned as `null` — the app derives those from `actionPeriods` client-side.
+
+### Auth expectations
+
+Writes reuse the **existing** Auth0 session (the same `Authorization: Bearer <access token>` path as the read tools, refreshed on 401). No separate credential, scope or login flow is required. Reads use the `JUMBO_WEB-loyalty` client, matching where the app issues these mutations.
+
+---
 
 ### 1. Prerequisites
 - Node.js `>= 18.0.0`
@@ -63,7 +142,56 @@ npx jumbo-mcp status
 
 ---
 
-## Client Integration
+## Promo digest (read-only)
+
+`jumbo_get_promo_digest` answers "of the things I actually buy, what is on offer right now?" — without asking the user to name a product.
+
+How it works, in order:
+
+1. **Mine receipts.** `receiptOverview` + `receipt` for the most recent receipts inside `days`, normalising each line item to a basket term and counting occurrences. Capped at **40** receipt-detail fetches (one request per receipt), with a small **120–200ms jittered pause between calls** so the mine does not burst the API.
+2. **Keep frequent terms.** Terms bought at least `min_times` times, sorted by frequency.
+3. **Resolve each term** with one keyword `searchProducts` call (top hit), also jitter-paced, and keep the products that currently carry a promotion.
+4. **Attach account offers.** `getCustomerPromotions` is reported separately as `account_offers` — it is not tied to a single product, so it is never faked into a per-product match.
+
+```json
+{
+  "days": 90, "min_times": 2, "limit": 25, "category": null,
+  "matched_count": 1,
+  "matched": [
+    {
+      "term": "Halfvolle melk", "times_bought": 2,
+      "product": { "sku": "SKU-MELK", "title": "Jumbo Halfvolle melk 1L", "url": "https://www.jumbo.com/producten/halfvolle-melk", "category": "Zuivel, eieren, boter" },
+      "was_price": 219, "now_price": 169, "discount": 50, "discount_percent": 23,
+      "unit_price": 169, "unit": "L",
+      "promo_types": ["2e halve prijs"],
+      "valid_from": "2026-10-13", "valid_until": "2026-10-19",
+      "is_available": true
+    }
+  ],
+  "not_matched": ["Bananen"],
+  "not_matched_count": 1,
+  "account_offers": [ { "id": "cp1", "title": "Persoonlijke korting", "euros_discount": 300, "minimum_spent": 2500, "expires_on": "2026-10-31" } ],
+  "scanned": { "receipts_scanned": 2, "receipts_available": 2, "distinct_terms": 3, "frequent_terms": 2 },
+  "notes": [ "Resolution is one keyword search per frequent term; the top hit is used. 2 frequent term(s) scanned." ]
+}
+```
+
+- Prices are **integer cents** to match the rest of this server.
+- **`matched` requires a promotion tag.** A product is only reported as matched when its assortment entry carries at least one `promotions` tag. A product with `promoPrice < price` but **no** `promotions` entry is treated as **not on offer** and lands in `not_matched` — the digest does not infer an offer from a price drop alone.
+- `not_matched` lists frequent purchases with **no current offer** (or that could not be resolved) — never silently dropped.
+- **Throttling.** Receipt-detail fetches and per-term searches are separated by a jittered 120–200ms pause (`digestPause`, `src/client.ts`), alongside the 40-receipt cap. Pick-up cost is a slower digest on large histories; correctness is unaffected.
+- Deterministic and side-effect free: read queries only; no writes, no basket, no checkout, no order or payment operations.
+- `notes` reports partial failures (receipts, product search, customer promotions) instead of aborting the whole digest.
+
+### What is *not* verified
+
+- `PromoDigestSearch` selects `category: rootCategory`, `start { date }`, `end { date }`, `durationTexts { shortTitle }`, `volumeDiscounts { discount volume }` and `maxPromotionQuantity` — these come from the app's `SearchProductDetails` fragment (`Product.promotions`), but the **combined** selection has not been sent live.
+- Receipt line-item parsing is the existing heuristic parser (`OMSCHRIJVING` ... `Totaal`), so oddly formatted receipts yield fewer terms rather than an error.
+- Product resolution is a **single keyword search, top hit**; there is no SKU-level reconciliation between the receipt text and the assortment item.
+- `getCustomerPromotions` field set is taken verbatim from the teardown; whether it needs arguments for a personalised payload is unconfirmed (it is called argument-less, matching the app).
+- `matched`/`not_matched` reflect the promotion data the assortment API carries today; this is a snapshot, not a scheduled push.
+
+
 
 ### Claude Desktop
 Add this to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS or `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
@@ -113,6 +241,7 @@ npm run build
 ```
 
 * `npm run dev`: Run server directly via `tsx`
+* `npm test`: Run unit tests (mocked HTTP layer, no live Jumbo calls)
 * `npm run login`: Run authentication CLI
 * `npm run status`: Verify live API connection and token status
 * `npm run build`: Compile TypeScript to `dist/`
