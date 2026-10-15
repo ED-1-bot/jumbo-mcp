@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "jumbo": {
-      "command": "npx",
-      "args": ["-y", "jumbo-mcp"]
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/jumbo-mcp/dist/index.js"]
     }
   }
 }

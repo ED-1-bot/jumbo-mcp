@@ -7,7 +7,7 @@ A Model Context Protocol (MCP) server for **Jumbo Supermarkten**, providing secu
 ## What's New in v0.1.0
 
 ### 1. Zero-Maintenance Auth0 Authentication
-* **Auth0 PKCE Flow:** Official OAuth2 PKCE login flow via `npx jumbo-mcp login`.
+* **Auth0 PKCE Flow:** Official OAuth2 PKCE login flow via `npm run login`.
 * **Persistent Refresh Token:** Generates a secure, persistent refresh token stored locally in `~/.config/jumbo-mcp/tokens.json`.
 * **Automatic Token Lifecycle:** Automatically refreshes 24-hour access tokens in the background on demand.
 * **Headless & VPS Gateway Support:** Can be deployed to remote servers and Docker containers with volume mounts and `JUMBO_REFRESH_TOKEN` / `JUMBO_TOKEN`.

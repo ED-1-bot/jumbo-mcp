@@ -6,18 +6,49 @@
 
 A Model Context Protocol (MCP) server for **Jumbo Supermarkten**.
 
-Connect your AI assistant (Claude Desktop, Cursor, OpenClaw, …) to your personal Jumbo account to read **digital receipts (*kassabonnen*)**, itemized prices and discounts, Extra's loyalty points, stores and products — and to manage your **shopping list (*lijstje*)**.
+Connect your AI assistant (Claude Desktop, Cursor, Antigravity, OpenClaw, …) to your personal Jumbo account to read **digital receipts (*kassabonnen*)**, itemized prices and discounts, Extra's loyalty points, stores and products — and to manage your **shopping list (*lijstje*)**.
 
 ---
 
-## Install
+## Installation & Setup
 
-Requires Node.js `>= 18`. Add the server to your MCP client config:
+Requires Node.js `>= 18`.
+
+### 1. Clone & Build
+```bash
+git clone https://github.com/Robert-SD/jumbo-mcp.git
+cd jumbo-mcp
+npm install
+npm run build
+```
+
+### 2. Authentication (One-time setup)
+One-time login through Jumbo's official Auth0 page. The server stores a persistent refresh token locally in `~/.config/jumbo-mcp/tokens.json` and renews access tokens automatically.
+
+```bash
+npm run login     # opens browser; paste redirected jumbo://callbacks/... URL back
+npm run status    # verify active connection and loyalty points
+```
+
+**Headless host (Docker, systemd, remote gateway):** copy `~/.config/jumbo-mcp/tokens.json` to the host, or set the environment variable directly:
+```bash
+JUMBO_REFRESH_TOKEN="your_refresh_token_here"
+```
+
+---
+
+## Client Integration
+
+### Method 1: Local Path (Recommended)
+Add the compiled server to your MCP client config:
 
 ```json
 {
   "mcpServers": {
-    "jumbo": { "command": "npx", "args": ["-y", "jumbo-mcp"] }
+    "jumbo": {
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/jumbo-mcp/dist/index.js"]
+    }
   }
 }
 ```
@@ -28,23 +59,47 @@ Requires Node.js `>= 18`. Add the server to your MCP client config:
 | Cursor | `~/.cursor/mcp.json` |
 | Other clients | the same `mcpServers` block |
 
----
-
-## Authentication
-
-One-time login through Jumbo's official Auth0 page. The server then stores a refresh token locally and renews access tokens automatically.
-
+### Method 2: Global Link (`npm link`)
+Run `npm link` inside the cloned directory to register `jumbo-mcp` globally on your system:
 ```bash
-npx jumbo-mcp login     # opens the browser; paste the redirected jumbo://callbacks/... URL back
-npx jumbo-mcp status    # verify the connection
+npm link
+```
+Then use:
+```json
+{
+  "mcpServers": {
+    "jumbo": {
+      "command": "jumbo-mcp"
+    }
+  }
+}
 ```
 
-The token is saved to `~/.config/jumbo-mcp/tokens.json`.
-
-**Headless host (Docker, systemd, remote gateway):** copy that file to the host, or set the token directly:
+### Method 3: Docker Deployment
+A multi-stage [`Dockerfile`](Dockerfile) is included for containerized environments:
 
 ```bash
-JUMBO_REFRESH_TOKEN="your_refresh_token_here"
+# Build Docker image
+docker build -t jumbo-mcp .
+```
+
+Run with mounted credentials:
+```json
+{
+  "mcpServers": {
+    "jumbo": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-v",
+        "${HOME}/.config/jumbo-mcp:/root/.config/jumbo-mcp",
+        "jumbo-mcp"
+      ]
+    }
+  }
+}
 ```
 
 ---
@@ -97,19 +152,12 @@ JUMBO_REFRESH_TOKEN="your_refresh_token_here"
 
 ## Local Development
 
-```bash
-git clone https://github.com/Robert-SD/jumbo-mcp.git
-cd jumbo-mcp
-npm install
-npm run build
-```
-
 | Command | Purpose |
 | :--- | :--- |
-| `npm run dev` | Run the server via `tsx` |
+| `npm run dev` | Run the server via `tsx` (development mode) |
 | `npm test` | Run the unit tests (mocked HTTP, no live Jumbo calls) |
-| `npm run login` | Authentication CLI |
-| `npm run status` | Verify the live connection and token |
+| `npm run login` | Authentication CLI wizard |
+| `npm run status` | Verify the live connection and token status |
 | `npm run build` | Compile TypeScript to `dist/` |
 
 ---
