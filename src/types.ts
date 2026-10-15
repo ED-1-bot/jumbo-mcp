@@ -104,3 +104,41 @@ export interface ProductSearchResult {
   total_count: number;
   products: ProductSearchItem[];
 }
+
+// ---------------------------------------------------------------------------
+// Shopping list
+// Mirrors the app's `fragment ShoppingListItem on ShoppingListItem`
+// (completed, id, sku, term) and the EditShoppingListItems / toggleShoppingList
+// unions from the APK teardown.
+// ---------------------------------------------------------------------------
+
+export interface ShoppingListItem {
+  /** Server-assigned id; null if the API omitted it. */
+  id: string | null;
+  /** Free-text description the user typed, e.g. "eieren". */
+  term: string;
+  /** SKU when the item is linked to a catalogue product, else null. */
+  sku: string | null;
+  completed: boolean;
+}
+
+export interface ShoppingList {
+  isActive: boolean;
+  items: ShoppingListItem[];
+}
+
+/**
+ * Input item for `EditShoppingListItems`. On add only `term` (+ optional
+ * `completed`) is sent; on edit the server round-tripped `id`/`sku` are echoed
+ * back. `completed` defaults to false server-side.
+ */
+export interface ShoppingListItemInput {
+  id?: string;
+  term: string;
+  sku?: string | null;
+  completed?: boolean;
+}
+
+export interface EditShoppingListItemsInput {
+  items: ShoppingListItemInput[];
+}

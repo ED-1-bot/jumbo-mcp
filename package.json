@@ -18,6 +18,7 @@
     "build": "tsc && chmod +x dist/index.js",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
+    "test": "node --import tsx --test test/*.test.ts",
     "login": "tsx src/index.ts login",
     "status": "tsx src/index.ts status",
     "prepublishOnly": "npm run build"

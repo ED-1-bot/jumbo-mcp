@@ -12,9 +12,30 @@ import {
   RecommendedProduct,
   ProductSearchItem,
   ProductSearchResult,
+  ShoppingList,
+  ShoppingListItem,
+  ShoppingListItemInput,
+  EditShoppingListItemsInput,
 } from "./types.js";
 
 const GRAPHQL_URL = "https://www.jumbo.com/api/graphql";
+
+/**
+ * Raised when a shopping-list mutation returns the `ShoppingListError` union
+ * member. Carries the API's `reason` and `errorMessage` verbatim so callers (and
+ * the MCP tool layer) can surface them instead of reporting a false success.
+ */
+export class JumboShoppingListError extends Error {
+  readonly reason: string;
+  readonly errorMessage: string;
+
+  constructor(reason: string, errorMessage: string) {
+    super(`Jumbo shopping list error [${reason}]: ${errorMessage}`);
+    this.name = "JumboShoppingListError";
+    this.reason = reason;
+    this.errorMessage = errorMessage;
+  }
+}
 
 export class JumboClient {
   private userAgent =
@@ -398,21 +419,165 @@ export class JumboClient {
     return data?.getBalance || { balance: 0 };
   }
 
-  async getShoppingList(): Promise<{ isActive: boolean; items: Array<{ id: string }> }> {
+  /**
+   * The GraphQL unions return `ShoppingListError` as a *successful* response
+   * (no top-level `errors`), so a mutation that failed semantically still looks
+   * like a 200. Always branch on `__typename` and raise, never swallow.
+   */
+  private raiseIfShoppingListError(value: any, operation: string): void {
+    if (value && value.__typename === "ShoppingListError") {
+      throw new JumboShoppingListError(
+        value.reason || "UNKNOWN",
+        value.errorMessage || `Jumbo rejected ${operation}.`
+      );
+    }
+  }
+
+  private mapShoppingListItems(raw: any[]): ShoppingListItem[] {
+    return (raw || []).map((i: any) => ({
+      id: i.id ?? null,
+      term: i.term ?? "",
+      sku: i.sku ?? null,
+      completed: Boolean(i.completed),
+    }));
+  }
+
+  async getShoppingList(): Promise<ShoppingList> {
     const q = `
     query GetShoppingList {
       shoppingList {
+        __typename
         ... on ShoppingList {
           isActive
           items {
             id
+            term
+            sku
+            completed
           }
+        }
+        ... on ShoppingListError {
+          reason
+          errorMessage
         }
       }
     }
     `;
     const data = await this.executeGraphql<any>(q, undefined, "JUMBO_WEB-loyalty");
-    return data?.shoppingList || { isActive: false, items: [] };
+    const list = data?.shoppingList;
+    this.raiseIfShoppingListError(list, "reading the shopping list");
+    return {
+      isActive: Boolean(list?.isActive),
+      items: this.mapShoppingListItems(list?.items),
+    };
+  }
+
+  /**
+   * Add or edit shopping-list items via `mutation EditShoppingListItems`.
+   * Returns the resulting item set as echoed by the API.
+   */
+  async editShoppingListItems(
+    input: EditShoppingListItemsInput
+  ): Promise<ShoppingListItem[]> {
+    if (!input.items || input.items.length === 0) {
+      throw new Error("editShoppingListItems requires at least one item.");
+    }
+    const q = `
+    mutation EditShoppingListItems($input: EditShoppingListItemsInput!) {
+      editShoppingListItems(input: $input) {
+        __typename
+        ... on EditShoppingListItemsResult {
+          items {
+            id
+            term
+            sku
+            completed
+          }
+        }
+        ... on ShoppingListError {
+          reason
+          errorMessage
+        }
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(q, { input }, "JUMBO_WEB-loyalty");
+    const result = data?.editShoppingListItems;
+    this.raiseIfShoppingListError(result, "editing shopping-list items");
+    if (result?.__typename !== "EditShoppingListItemsResult") {
+      throw new JumboShoppingListError(
+        "UNEXPECTED_RESULT",
+        `Unexpected result type '${result?.__typename ?? "null"}' from editShoppingListItems.`
+      );
+    }
+    return this.mapShoppingListItems(result.items);
+  }
+
+  /**
+   * Convenience wrapper for the common "add eggs" case: one or more free-text
+   * terms, optionally auto-activating an inactive list first.
+   */
+  async addShoppingListItems(
+    terms: string[],
+    options?: { sku?: string | null; completed?: boolean; ensureActive?: boolean }
+  ): Promise<{ isActive: boolean; added: ShoppingListItem[]; activated: boolean }> {
+    const cleaned = (terms || [])
+      .map((t) => String(t).trim())
+      .filter((t) => t.length > 0);
+    if (cleaned.length === 0) {
+      throw new Error("addShoppingListItems requires at least one non-empty term.");
+    }
+
+    let activated = false;
+    if (options?.ensureActive ?? true) {
+      const current = await this.getShoppingList();
+      if (!current.isActive) {
+        await this.setShoppingListActive(true);
+        activated = true;
+      }
+    }
+
+    const items: ShoppingListItemInput[] = cleaned.map((term) => ({
+      term,
+      ...(options?.sku ? { sku: options.sku } : {}),
+      completed: options?.completed ?? false,
+    }));
+
+    const added = await this.editShoppingListItems({ items });
+    const list = await this.getShoppingList();
+    return { isActive: list.isActive, added, activated };
+  }
+
+  /** Activate/deactivate the shopping list via `mutation toggleShoppingList`. */
+  async setShoppingListActive(active: boolean): Promise<boolean> {
+    const q = `
+    mutation toggleShoppingList($input: ToggleShoppingListInput!) {
+      toggleShoppingList(input: $input) {
+        __typename
+        ... on ShoppingListState {
+          isActive
+        }
+        ... on ShoppingListError {
+          reason
+          errorMessage
+        }
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(
+      q,
+      { input: { active } },
+      "JUMBO_WEB-loyalty"
+    );
+    const result = data?.toggleShoppingList;
+    this.raiseIfShoppingListError(result, "toggling the shopping list");
+    if (result?.__typename !== "ShoppingListState") {
+      throw new JumboShoppingListError(
+        "UNEXPECTED_RESULT",
+        `Unexpected result type '${result?.__typename ?? "null"}' from toggleShoppingList.`
+      );
+    }
+    return Boolean(result.isActive);
   }
 
   async searchStores(options?: {

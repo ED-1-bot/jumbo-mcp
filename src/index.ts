@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import * as dotenv from "dotenv";
-import { JumboClient } from "./client.js";
+import { JumboClient, JumboShoppingListError } from "./client.js";
 import {
   decodeJwtPayload,
   getTokensFilePath,
@@ -17,6 +17,37 @@ import {
 dotenv.config();
 
 const client = new JumboClient();
+
+/**
+ * Shape an MCP tool error. Shopping-list union errors carry the API's own
+ * `reason`/`errorMessage`; surface both verbatim, never as a generic message.
+ */
+function toolError(error: any) {
+  if (error instanceof JumboShoppingListError) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              status: "error",
+              error: "ShoppingListError",
+              reason: error.reason,
+              errorMessage: error.errorMessage,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+      isError: true,
+    };
+  }
+  return {
+    content: [{ type: "text" as const, text: `Error: ${error.message}` }],
+    isError: true,
+  };
+}
 
 async function showStatus(): Promise<void> {
   let tokens = loadTokens();
@@ -256,7 +287,7 @@ async function startServer(): Promise<void> {
   // Tool: Get Shopping List
   server.tool(
     "jumbo_get_shopping_list",
-    "Get the user's current active Jumbo shopping list.",
+    "Get the user's Jumbo shopping list ('lijstje'): whether it is active and every item (id, term, sku, completed).",
     {},
     async () => {
       try {
@@ -270,10 +301,7 @@ async function startServer(): Promise<void> {
           ],
         };
       } catch (error: any) {
-        return {
-          content: [{ type: "text", text: `Error: ${error.message}` }],
-          isError: true,
-        };
+        return toolError(error);
       }
     }
   );
@@ -389,6 +417,75 @@ async function startServer(): Promise<void> {
           content: [{ type: "text", text: `Error: ${error.message}` }],
           isError: true,
         };
+      }
+    }
+  );
+
+  // Tool: Add Shopping List Items (WRITE)
+  server.tool(
+    "jumbo_add_shopping_list_items",
+    "Add one or more free-text items to the user's Jumbo shopping list (e.g. ['eieren']). " +
+      "This WRITES to the user's real Jumbo account. If the list is inactive it is activated first " +
+      "(set ensure_active=false to skip). Never touches the basket, checkout, orders or payments.",
+    {
+      items: z
+        .array(z.string().min(1))
+        .min(1)
+        .describe("One or more free-text item names to add, e.g. ['eieren', 'melk']"),
+      ensure_active: z
+        .boolean()
+        .default(true)
+        .describe("Activate the shopping list first if it is inactive (default true)"),
+    },
+    async ({ items, ensure_active }) => {
+      try {
+        const result = await client.addShoppingListItems(items, {
+          ensureActive: ensure_active,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  status: "ok",
+                  is_active: result.isActive,
+                  activated_first: result.activated,
+                  added: result.added,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Set Shopping List Active (WRITE)
+  server.tool(
+    "jumbo_set_shopping_list_active",
+    "Activate or deactivate the user's Jumbo shopping list ('lijstje'). " +
+      "This WRITES to the user's real Jumbo account; it does not add or remove items.",
+    {
+      active: z.boolean().describe("true to activate the shopping list, false to deactivate"),
+    },
+    async ({ active }) => {
+      try {
+        const isActive = await client.setShoppingListActive(active);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ status: "ok", is_active: isActive }, null, 2),
+            },
+          ],
+        };
+      } catch (error: any) {
+        return toolError(error);
       }
     }
   );
