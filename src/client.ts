@@ -16,6 +16,9 @@ import {
   ShoppingListItem,
   ShoppingListItemInput,
   EditShoppingListItemsInput,
+  Basket,
+  DepositsResult,
+  StampsResult,
 } from "./types.js";
 
 const GRAPHQL_URL = "https://www.jumbo.com/api/graphql";
@@ -25,15 +28,29 @@ const GRAPHQL_URL = "https://www.jumbo.com/api/graphql";
  * member. Carries the API's `reason` and `errorMessage` verbatim so callers (and
  * the MCP tool layer) can surface them instead of reporting a false success.
  */
-export class JumboShoppingListError extends Error {
+/**
+ * Generic union error. Jumbo's write/read unions return their failure member as
+ * a *successful* GraphQL response (HTTP 200, no top-level `errors`), so callers
+ * must branch on `__typename` and raise. Carries the API's own values.
+ */
+export class JumboApiError extends Error {
+  readonly typename: string;
   readonly reason: string;
   readonly errorMessage: string;
 
-  constructor(reason: string, errorMessage: string) {
-    super(`Jumbo shopping list error [${reason}]: ${errorMessage}`);
-    this.name = "JumboShoppingListError";
+  constructor(typename: string, reason: string, errorMessage: string) {
+    super(`Jumbo ${typename} [${reason}]: ${errorMessage}`);
+    this.name = "JumboApiError";
+    this.typename = typename;
     this.reason = reason;
     this.errorMessage = errorMessage;
+  }
+}
+
+export class JumboShoppingListError extends JumboApiError {
+  constructor(reason: string, errorMessage: string) {
+    super("ShoppingListError", reason, errorMessage);
+    this.name = "JumboShoppingListError";
   }
 }
 
@@ -519,8 +536,19 @@ export class JumboClient {
    */
   async addShoppingListItems(
     terms: string[],
-    options?: { sku?: string | null; completed?: boolean; ensureActive?: boolean }
-  ): Promise<{ isActive: boolean; added: ShoppingListItem[]; activated: boolean }> {
+    options?: {
+      sku?: string | null;
+      completed?: boolean;
+      ensureActive?: boolean;
+      /** Skip terms already on the list (case-insensitive, trimmed). Default true. */
+      dedupe?: boolean;
+    }
+  ): Promise<{
+    isActive: boolean;
+    added: ShoppingListItem[];
+    activated: boolean;
+    skipped: string[];
+  }> {
     const cleaned = (terms || [])
       .map((t) => String(t).trim())
       .filter((t) => t.length > 0);
@@ -528,24 +556,42 @@ export class JumboClient {
       throw new Error("addShoppingListItems requires at least one non-empty term.");
     }
 
+    const ensureActive = options?.ensureActive ?? true;
+    const dedupe = options?.dedupe ?? true;
+
+    const before = await this.getShoppingList();
     let activated = false;
-    if (options?.ensureActive ?? true) {
-      const current = await this.getShoppingList();
-      if (!current.isActive) {
-        await this.setShoppingListActive(true);
-        activated = true;
-      }
+    if (ensureActive && !before.isActive) {
+      await this.setShoppingListActive(true);
+      activated = true;
     }
 
-    const items: ShoppingListItemInput[] = cleaned.map((term) => ({
-      term,
-      ...(options?.sku ? { sku: options.sku } : {}),
-      completed: options?.completed ?? false,
-    }));
+    const existing = new Set(before.items.map((i) => i.term.trim().toLowerCase()));
+    const skipped: string[] = [];
+    const toAdd: string[] = [];
+    for (const term of cleaned) {
+      const key = term.toLowerCase();
+      const alreadyThere =
+        existing.has(key) || toAdd.some((t) => t.toLowerCase() === key);
+      if (dedupe && alreadyThere) {
+        skipped.push(term);
+        continue;
+      }
+      toAdd.push(term);
+    }
 
-    const added = await this.editShoppingListItems({ items });
+    const added = toAdd.length
+      ? await this.editShoppingListItems({
+          items: toAdd.map((term) => ({
+            term,
+            ...(options?.sku ? { sku: options.sku } : {}),
+            completed: options?.completed ?? false,
+          })),
+        })
+      : [];
+
     const list = await this.getShoppingList();
-    return { isActive: list.isActive, added, activated };
+    return { isActive: list.isActive, added, activated, skipped };
   }
 
   /** Activate/deactivate the shopping list via `mutation toggleShoppingList`. */
@@ -867,6 +913,315 @@ export class JumboClient {
       query: options.query,
       total_count: res?.searchProducts?.count ?? products.length,
       products,
+    };
+  }
+
+  /** Generic union unwrap: raise on the `*Error` member, enforce the success member. */
+  private unwrapUnion<T = any>(
+    value: any,
+    successTypes: string[],
+    operation: string
+  ): T {
+    const tn = value?.__typename;
+    if (typeof tn === "string" && tn.endsWith("Error")) {
+      throw new JumboApiError(
+        tn,
+        value.reason ?? "UNKNOWN",
+        value.errorMessage ?? value.message ?? `Jumbo rejected ${operation}.`
+      );
+    }
+    if (typeof tn !== "string" || !successTypes.includes(tn)) {
+      throw new JumboApiError(
+        tn ?? "Unknown",
+        "UNEXPECTED_RESULT",
+        `Unexpected result type '${tn ?? "null"}' from ${operation}.`
+      );
+    }
+    return value as T;
+  }
+
+  /** Remove shopping-list items by id. `ShoppingListItemIdsResult | ShoppingListError`. */
+  async removeShoppingListItems(itemIds: string[]): Promise<string[]> {
+    const ids = (itemIds || []).map((s) => String(s).trim()).filter(Boolean);
+    if (ids.length === 0) {
+      throw new Error("removeShoppingListItems requires at least one item id.");
+    }
+    const q = `
+    mutation RemoveShoppingListItems($input: RemoveShoppingListItemsInput!) {
+      removeShoppingListItems(input: $input) {
+        __typename
+        ... on ShoppingListItemIdsResult {
+          itemIds
+        }
+        ... on ShoppingListError {
+          reason
+          errorMessage
+        }
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(
+      q,
+      { input: { shoppingListItemIds: ids } },
+      "JUMBO_WEB-loyalty"
+    );
+    const result = data?.removeShoppingListItems;
+    this.raiseIfShoppingListError(result, "removing shopping-list items");
+    if (result?.__typename !== "ShoppingListItemIdsResult") {
+      throw new JumboShoppingListError(
+        "UNEXPECTED_RESULT",
+        `Unexpected result type '${result?.__typename ?? "null"}' from removeShoppingListItems.`
+      );
+    }
+    return result.itemIds ?? [];
+  }
+
+  /**
+   * Tick an item off (or back on). Looks the item up first so the edit payload
+   * carries the server's own `term`/`sku` alongside `completed`.
+   */
+  async setShoppingListItemCompleted(
+    itemId: string,
+    completed: boolean
+  ): Promise<ShoppingListItem[]> {
+    const list = await this.getShoppingList();
+    const item = list.items.find((i) => i.id === itemId);
+    if (!item) {
+      throw new JumboShoppingListError(
+        "ITEM_NOT_FOUND",
+        `No shopping-list item with id '${itemId}'.`
+      );
+    }
+    const input: ShoppingListItemInput = {
+      term: item.term,
+      completed,
+      ...(item.id ? { id: item.id } : {}),
+      ...(item.sku ? { sku: item.sku } : {}),
+    };
+    return this.editShoppingListItems({ items: [input] });
+  }
+
+  /** Read-only active basket via the GraphQL `ActiveBasket` operation. */
+  async getBasket(): Promise<Basket> {
+    const q = `
+    query ActiveBasket($orderChannel: OrderChannel!) {
+      activeBasket {
+        __typename
+        ... on ActiveBasketResult {
+          basket {
+            id
+            totalProductCount
+            lines {
+              sku
+              id
+              quantity
+              details {
+                title
+                price {
+                  price
+                  promoPrice
+                }
+                promotions {
+                  tags {
+                    text
+                  }
+                }
+              }
+            }
+            calculation {
+              totals {
+                itemSubtotal {
+                  amount
+                  currency
+                }
+                totalToPay {
+                  amount
+                  currency
+                }
+              }
+            }
+          }
+        }
+        ... on BasketError {
+          reason
+          errorMessage
+        }
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(
+      q,
+      { orderChannel: "MOBILE_WEB" },
+      "JUMBO_WEB-basket"
+    );
+    const res = this.unwrapUnion<any>(
+      data?.activeBasket,
+      ["ActiveBasketResult"],
+      "reading the active basket"
+    );
+    const b = res.basket;
+    const lines = (b?.lines ?? []).map((l: any) => {
+      const d = l.details ?? {};
+      const unit = d.price?.price ?? null;
+      const promo = d.price?.promoPrice ?? null;
+      const qty = l.quantity ?? 0;
+      const effective = promo ?? unit;
+      return {
+        sku: l.sku ?? null,
+        id: l.id ?? null,
+        title: d.title ?? "",
+        quantity: qty,
+        unit_price: unit,
+        promo_price: promo,
+        line_total: effective !== null ? effective * qty : null,
+        promotions: (d.promotions ?? []).flatMap(
+          (p: any) => (p.tags ?? []).map((t: any) => t.text).filter(Boolean)
+        ),
+      };
+    });
+    const totals = b?.calculation?.totals;
+    return {
+      id: b?.id ?? null,
+      total_product_count:
+        b?.totalProductCount ?? lines.reduce((a: number, l: any) => a + l.quantity, 0),
+      lines,
+      subtotal: totals?.itemSubtotal?.amount ?? null,
+      total_to_pay: totals?.totalToPay?.amount ?? null,
+      currency: totals?.itemSubtotal?.currency ?? null,
+    };
+  }
+
+  /**
+   * Deposits (statiegeld) for a single order. `GetDeposits` requires an orderId:
+   * `deposits` is the global catalogue, `returnedDeposits(orderId:)` is per-order.
+   */
+  async getDeposits(orderId: string): Promise<DepositsResult> {
+    const id = String(orderId ?? "").trim();
+    if (!id) throw new Error("getDeposits requires an orderId.");
+    const q = `
+    query GetDeposits($orderId: String!) {
+      deposits {
+        sku
+        description
+        category
+        chargeType
+        unitPrice {
+          amount
+          currency
+        }
+      }
+      returnedDeposits(orderId: $orderId) {
+        __typename
+        ... on ReturnedDepositsResponseSuccess {
+          returnedDeposits {
+            sku
+            price {
+              amount
+              currency
+            }
+            returnedByCustomerQuantity
+          }
+          returnedDepositsTotalAmount {
+            amount
+            currency
+          }
+        }
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(q, { orderId: id }, "JUMBO_WEB-orders");
+
+    // The error member's fields are not in the teardown, so only __typename is
+    // selected above; surface it verbatim rather than guessing at a message.
+    const returned = data?.returnedDeposits;
+    if (returned?.__typename && returned.__typename !== "ReturnedDepositsResponseSuccess") {
+      throw new JumboApiError(
+        returned.__typename,
+        returned.reason ?? "UNKNOWN",
+        returned.errorMessage ?? `returnedDeposits returned '${returned.__typename}'.`
+      );
+    }
+
+    return {
+      order_id: id,
+      deposits: (data?.deposits ?? []).map((d: any) => ({
+        sku: d.sku,
+        description: d.description ?? "",
+        category: d.category ?? null,
+        charge_type: d.chargeType ?? null,
+        unit_price: d.unitPrice?.amount ?? null,
+        currency: d.unitPrice?.currency ?? null,
+      })),
+      returned: {
+        items: (returned?.returnedDeposits ?? []).map((r: any) => ({
+          sku: r.sku,
+          unit_price: r.price?.amount ?? null,
+          currency: r.price?.currency ?? null,
+          returned_quantity: r.returnedByCustomerQuantity ?? null,
+        })),
+        total: returned?.returnedDepositsTotalAmount?.amount ?? null,
+        currency: returned?.returnedDepositsTotalAmount?.currency ?? null,
+      },
+    };
+  }
+
+  /** Digital stamps: per-campaign stamp counts, active saving campaigns, buying-stamp balance. */
+  async getStamps(): Promise<StampsResult> {
+    const q = `
+    query GetStamps {
+      getDigitalStamps {
+        digitalStamps {
+          campaignId
+          numberStamps
+        }
+      }
+      getCampaigns(active: true, campaignType: "SAVING") {
+        active
+        id
+        title
+        campaignCode
+        campaignData {
+          numberOfStampsPerCard
+          stampsNeededForRedemption {
+            stamps
+            subTitle
+          }
+          stampType
+        }
+      }
+      getBuyingStampsBalance {
+        monetaryValue
+        amountOfStamps
+        amountOfStampsPerCard
+      }
+    }
+    `;
+    const data = await this.executeGraphql<any>(q, undefined, "JUMBO_WEB-loyalty");
+    return {
+      digital_stamps: (data?.getDigitalStamps?.digitalStamps ?? []).map((s: any) => ({
+        campaign_id: s.campaignId,
+        number_stamps: s.numberStamps ?? 0,
+      })),
+      saving_campaigns: (data?.getCampaigns ?? []).map((c: any) => ({
+        id: c.id,
+        title: c.title ?? "",
+        campaign_code: c.campaignCode ?? null,
+        active: Boolean(c.active),
+        stamps_needed_for_redemption:
+          c.campaignData?.stampsNeededForRedemption?.stamps ?? null,
+        number_of_stamps_per_card: c.campaignData?.numberOfStampsPerCard ?? null,
+        stamp_type: c.campaignData?.stampType ?? null,
+        starts_at: null,
+        ends_at: null,
+      })),
+      buying_stamps: data?.getBuyingStampsBalance
+        ? {
+            monetary_value: data.getBuyingStampsBalance.monetaryValue ?? null,
+            amount_of_stamps: data.getBuyingStampsBalance.amountOfStamps ?? null,
+            amount_of_stamps_per_card:
+              data.getBuyingStampsBalance.amountOfStampsPerCard ?? null,
+          }
+        : null,
     };
   }
 }

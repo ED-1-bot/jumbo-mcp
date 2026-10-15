@@ -30,8 +30,13 @@ This server enables AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw
 | `jumbo_search_receipts` | Search for specific grocery items purchased across recent receipts by keyword (e.g. `'havermelk'`, `'bio ei'`, `'skyr'`). | `query` (required), `max_receipts` (default: `10`) |
 | `jumbo_get_balance` | Get live Jumbo Extra's loyalty points balance. | None |
 | `jumbo_get_shopping_list` | Retrieve the customer's shopping list: `isActive` plus every item (`id`, `term`, `sku`, `completed`). | None |
-| `jumbo_add_shopping_list_items` | **Write.** Add one or more free-text items to the shopping list (e.g. `['eieren']`). Activates the list first when it is inactive (unless `ensure_active` is `false`). | `items` (required, `string[]`), `ensure_active` (default: `true`) |
+| `jumbo_add_shopping_list_items` | **Write.** Add one or more free-text items to the shopping list (e.g. `['eieren']`). Activates the list first when it is inactive; skips terms already present (case-insensitive). | `items` (required, `string[]`), `ensure_active` (default: `true`), `dedupe` (default: `true`) |
 | `jumbo_set_shopping_list_active` | **Write.** Activate or deactivate the shopping list. Adds/removes no items. | `active` (required, `boolean`) |
+| `jumbo_remove_shopping_list_items` | **Write.** Remove items by id (ids from `jumbo_get_shopping_list`). | `item_ids` (required, `string[]`) |
+| `jumbo_set_shopping_list_item_completed` | **Write.** Tick an item off (`completed: true`) or back on (`false`). | `item_id` (required), `completed` (required, `boolean`) |
+| `jumbo_get_basket` | **Read-only.** Current basket: lines with quantity, unit price, line total, promotions applied, and subtotal. Uses GraphQL `ActiveBasket`. No basket writes / checkout / order / payment. | None |
+| `jumbo_get_deposits` | **Read-only.** Statiegeld for one order: the deposit catalogue plus deposits returned on that order and the returned total. **Order-scoped — `order_id` is required.** | `order_id` (required) |
+| `jumbo_get_stamps` | **Read-only.** Digital stamps: per-campaign stamp counts, active saving (spaar) campaigns, buying-stamps balance. | None |
 | `jumbo_search_stores` | Search nearby Jumbo supermarket stores by city, address, or geographic coordinates (latitude, longitude). Returns address, distance, opening hours, and facilities. | `query` (optional), `latitude` (optional), `longitude` (optional) |
 | `jumbo_search_products` | Search the entire Jumbo supermarket grocery catalog by keyword. Returns matching products, current prices, promotional discounts, unit prices, product links, and SKUs. | `query` (required), `sort` (optional: `'PRICE_ASC'` or `'PRICE_DESC'`), `limit` (default: `20`, max: `30`) |
 | `jumbo_get_product_recommendations` | Get product recommendations, alternatives, and cross-sell suggestions by SKU or search keyword, or retrieve current weekly promotional recommendations. | `sku` (optional), `query` (optional), `promotions_only` (optional, default: `false`) |
@@ -67,9 +72,24 @@ Behaviour:
 | Parameters | `active: boolean` (required) |
 | Returns | `{ status: "ok", is_active }` |
 
+### Dedupe on add
+
+`jumbo_add_shopping_list_items` **skips terms already on the list** (compared trimmed and case-insensitive) and reports them in `skipped`. Within a single call, repeated terms are collapsed to one. Set `dedupe: false` to restore the original duplicate-allowed behaviour.
+
+```json
+{ "status": "ok", "is_active": true, "activated_first": false,
+  "added": [ { "id": "3", "term": "BROOD", "sku": null, "completed": false } ],
+  "skipped": [ "eieren", "melk" ] }
+```
+
+### Remove, and tick off
+
+- `jumbo_remove_shopping_list_items` — `mutation RemoveShoppingListItems`, `{ input: { shoppingListItemIds: string[] } }` → `ShoppingListItemIdsResult.itemIds | ShoppingListError`.
+- `jumbo_set_shopping_list_item_completed` — reads the list, finds the item by id, then re-sends it with `completed` flipped. Unknown ids raise `ITEM_NOT_FOUND` without touching the API.
+
 ### Failure modes
 
-The API returns shopping-list failures as a **union member** (`ShoppingListError`) inside an HTTP 200 response — not as a GraphQL top-level error. The client branches on `__typename` and raises `JumboShoppingListError`, and the tool returns it as a structured `isError` payload with the API's own values:
+The API returns shopping-list failures as a **union member** (`ShoppingListError`) inside an HTTP 200 response — not as a GraphQL top-level error. The client branches on `__typename` and raises; the tool returns an `isError` payload with the API's own values. The same pattern covers `BasketError` and `ReturnedDepositsError` via `JumboApiError`:
 
 ```json
 {
@@ -80,7 +100,15 @@ The API returns shopping-list failures as a **union member** (`ShoppingListError
 }
 ```
 
-A mutation is **never** reported as success unless it returned `EditShoppingListItemsResult` / `ShoppingListState`. An unexpected union member raises `UNEXPECTED_RESULT`. Credentials are never echoed into any error text.
+A mutation/query is **never** reported as success unless it returned the expected success member. An unexpected member raises `UNEXPECTED_RESULT`. Credentials are never echoed into any error text.
+
+### What is *not* verified
+
+- `EditShoppingListItemsInput` / `ToggleShoppingListInput` / `RemoveShoppingListItemsInput` field shapes are **inferred** from the app's client-side call sites; the teardown confirms operation names and the `ShoppingListItem` fragment only.
+- `jumbo_get_basket` selects `basket.calculation` **without** the `voucherCodes` / `shippingCosts` arguments the app passes; whether the server accepts an argument-less `calculation` selection is unconfirmed until the first live call.
+- `ReturnedDepositsError`'s fields do not appear anywhere in the teardown, so only `__typename` is selected and surfaced.
+- `jumbo_get_stamps` merges `getDigitalStamps` + `getCampaigns` + `getBuyingStampsBalance` into one `GetStamps` operation; the app issues them separately, so the combined selection is unconfirmed.
+- `starts_at` / `ends_at` on saving campaigns are returned as `null` — the app derives those from `actionPeriods` client-side.
 
 ### Auth expectations
 

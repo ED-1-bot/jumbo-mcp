@@ -65,7 +65,7 @@ test("writes EditShoppingListItems with the exact term/completed payload", async
             shoppingList: {
               __typename: "ShoppingList",
               isActive: true,
-              items: [{ id: "1", term: "eieren", sku: null, completed: false }],
+              items: [],
             },
           },
         });

@@ -436,11 +436,18 @@ async function startServer(): Promise<void> {
         .boolean()
         .default(true)
         .describe("Activate the shopping list first if it is inactive (default true)"),
+      dedupe: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Skip terms already on the list (case-insensitive, trimmed). Set false to allow duplicates (default true)"
+        ),
     },
-    async ({ items, ensure_active }) => {
+    async ({ items, ensure_active, dedupe }) => {
       try {
         const result = await client.addShoppingListItems(items, {
           ensureActive: ensure_active,
+          dedupe,
         });
         return {
           content: [
@@ -452,6 +459,7 @@ async function startServer(): Promise<void> {
                   is_active: result.isActive,
                   activated_first: result.activated,
                   added: result.added,
+                  skipped: result.skipped,
                 },
                 null,
                 2
@@ -484,6 +492,103 @@ async function startServer(): Promise<void> {
             },
           ],
         };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Remove Shopping List Items (WRITE)
+  server.tool(
+    "jumbo_remove_shopping_list_items",
+    "Remove one or more items from the user's Jumbo shopping list by item id (ids come from jumbo_get_shopping_list). " +
+      "This WRITES to the user's real Jumbo account. Shopping list only.",
+    {
+      item_ids: z
+        .array(z.string().min(1))
+        .min(1)
+        .describe("One or more shopping-list item ids to remove"),
+    },
+    async ({ item_ids }) => {
+      try {
+        const removed = await client.removeShoppingListItems(item_ids);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify({ status: "ok", removed }, null, 2) },
+          ],
+        };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Complete / un-complete a shopping list item (WRITE)
+  server.tool(
+    "jumbo_set_shopping_list_item_completed",
+    "Tick an item on the user's Jumbo shopping list off (completed=true) or back on (completed=false). " +
+      "This WRITES to the user's real Jumbo account.",
+    {
+      item_id: z.string().min(1).describe("Shopping-list item id (from jumbo_get_shopping_list)"),
+      completed: z.boolean().describe("true to tick off, false to un-tick"),
+    },
+    async ({ item_id, completed }) => {
+      try {
+        const items = await client.setShoppingListItemCompleted(item_id, completed);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify({ status: "ok", items }, null, 2) },
+          ],
+        };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Get Basket (read-only)
+  server.tool(
+    "jumbo_get_basket",
+    "Read-only view of the current Jumbo basket: lines with quantity, unit price, line total, promotions applied, and the basket subtotal. " +
+      "Uses the GraphQL ActiveBasket operation. No basket writes, no checkout, no order, no payment operations.",
+    {},
+    async () => {
+      try {
+        const basket = await client.getBasket();
+        return { content: [{ type: "text", text: JSON.stringify(basket, null, 2) }] };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Get Deposits (read-only)
+  server.tool(
+    "jumbo_get_deposits",
+    "Read statiegeld (deposit) information for one order: the deposit catalogue and the deposits returned on that order, with the returned total. " +
+      "Requires an order_id — Jumbo's returned-deposits query is order-scoped.",
+    {
+      order_id: z.string().min(1).describe("Order id (from the order history / receipts)"),
+    },
+    async ({ order_id }) => {
+      try {
+        const deposits = await client.getDeposits(order_id);
+        return { content: [{ type: "text", text: JSON.stringify(deposits, null, 2) }] };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
+  // Tool: Get Stamps (read-only)
+  server.tool(
+    "jumbo_get_stamps",
+    "Read the user's digital stamps: per-campaign stamp counts, active saving (spaar) campaigns, and the buying-stamps balance.",
+    {},
+    async () => {
+      try {
+        const stamps = await client.getStamps();
+        return { content: [{ type: "text", text: JSON.stringify(stamps, null, 2) }] };
       } catch (error: any) {
         return toolError(error);
       }

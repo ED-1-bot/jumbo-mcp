@@ -142,3 +142,89 @@ export interface ShoppingListItemInput {
 export interface EditShoppingListItemsInput {
   items: ShoppingListItemInput[];
 }
+
+// ---------------------------------------------------------------------------
+// Basket (read-only), deposits, digital stamps
+// ---------------------------------------------------------------------------
+
+export interface BasketLine {
+  sku: string | null;
+  id: string | null;
+  title: string;
+  quantity: number;
+  /** Unit price in cents (Jumbo's `price.price`). */
+  unit_price: number | null;
+  /** Promotional unit price in cents, when on offer. */
+  promo_price: number | null;
+  /** Quantity x applicable unit price, in cents. */
+  line_total: number | null;
+  promotions: string[];
+}
+
+export interface Basket {
+  id: string | null;
+  total_product_count: number;
+  lines: BasketLine[];
+  /** `itemSubtotal` in cents. */
+  subtotal: number | null;
+  /** `totalToPay` in cents. */
+  total_to_pay: number | null;
+  currency: string | null;
+}
+
+export interface DepositProduct {
+  sku: string;
+  description: string;
+  category: string | null;
+  charge_type: string | null;
+  unit_price: number | null;
+  currency: string | null;
+}
+
+export interface ReturnedDeposit {
+  sku: string;
+  unit_price: number | null;
+  currency: string | null;
+  returned_quantity: number | null;
+}
+
+export interface DepositsResult {
+  order_id: string;
+  /** Global statiegeld catalogue (root `deposits`, order-independent). */
+  deposits: DepositProduct[];
+  /** Per-order returned deposits (`returnedDeposits(orderId:)`). */
+  returned: {
+    items: ReturnedDeposit[];
+    total: number | null;
+    currency: string | null;
+  };
+}
+
+export interface DigitalStampBalance {
+  campaign_id: string;
+  number_stamps: number;
+}
+
+export interface StampCampaign {
+  id: string;
+  title: string;
+  campaign_code: string | null;
+  active: boolean;
+  stamps_needed_for_redemption: number | null;
+  number_of_stamps_per_card: number | null;
+  stamp_type: string | null;
+  starts_at: string | null;
+  ends_at: string | null;
+}
+
+export interface BuyingStampsBalance {
+  monetary_value: number | null;
+  amount_of_stamps: number | null;
+  amount_of_stamps_per_card: number | null;
+}
+
+export interface StampsResult {
+  digital_stamps: DigitalStampBalance[];
+  saving_campaigns: StampCampaign[];
+  buying_stamps: BuyingStampsBalance | null;
+}
