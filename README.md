@@ -6,7 +6,7 @@
 
 A Model Context Protocol (MCP) server for **Jumbo Supermarkten**.
 
-Connect your AI assistant (Claude Desktop, Cursor, Antigravity, OpenClaw, …) to your personal Jumbo account to read **digital receipts (*kassabonnen*)**, itemized prices and discounts, Extra's loyalty points, stores and products — and to manage your **shopping list (*lijstje*)**.
+Connect your AI assistant (Claude Desktop, Cursor, Antigravity, OpenClaw, …) to your personal Jumbo account to read **digital receipts (*kassabonnen*)**, itemized prices and discounts, Extra's loyalty points, stores and products, and to manage your **shopping list (*lijstje*)**.
 
 ---
 
@@ -108,13 +108,13 @@ Run with mounted credentials:
 
 | Tool | Description | Parameters |
 | :--- | :--- | :--- |
-| `jumbo_login` | Verify the connection and return the loyalty identity and points balance. | — |
-| `jumbo_get_profile` | Loyalty profile: name, customer ID, Extra's card, receipt preferences. | — |
+| `jumbo_login` | Verify the connection and return the loyalty identity and points balance. | None |
+| `jumbo_get_profile` | Loyalty profile: name, customer ID, Extra's card, receipt preferences. | None |
 | `jumbo_list_receipts` | Recent receipts with timestamps, store and transaction IDs. | `page` (`0`), `page_size` (`10`, max `30`) |
 | `jumbo_get_receipt_details` | Full itemized lines, unit prices, discounts, total, payment method, VAT. | `transaction_id` (required) |
 | `jumbo_search_receipts` | Find items bought across recent receipts by keyword (e.g. `'havermelk'`). | `query` (required), `max_receipts` (`10`) |
-| `jumbo_get_balance` | Live Extra's loyalty points balance. | — |
-| `jumbo_get_shopping_list` | The shopping list: `isActive` plus every item. | — |
+| `jumbo_get_balance` | Live Extra's loyalty points balance. | None |
+| `jumbo_get_shopping_list` | The shopping list: `isActive` plus every item. | None |
 | `jumbo_add_shopping_list_items` | **Write.** Add free-text items (e.g. `['eieren']`); activates the list if needed. | `items` (required), `ensure_active` (`true`), `dedupe` (`true`) |
 | `jumbo_remove_shopping_list_items` | **Write.** Remove items by id. | `item_ids` (required) |
 | `jumbo_set_shopping_list_item_completed` | **Write.** Tick an item off or back on. | `item_id`, `completed` (both required) |
@@ -123,9 +123,9 @@ Run with mounted credentials:
 | `jumbo_search_products` | Search the catalog: prices, promotions, unit prices, links, SKUs. | `query` (required), `sort`, `limit` (`20`, max `30`) |
 | `jumbo_get_product_recommendations` | Recommendations, alternatives, cross-sells, or weekly promotions. | `sku`, `query`, `promotions_only` (`false`) |
 | `jumbo_get_promo_digest` | What's on offer among the things you actually buy (read-only). | `days` (`90`), `min_times` (`2`), `limit` (`25`), `category` |
-| `jumbo_get_basket` | Current basket: lines, quantities, unit prices, promotions, subtotal. | — |
+| `jumbo_get_basket` | Current basket: lines, quantities, unit prices, promotions, subtotal. | None |
 | `jumbo_get_deposits` | Statiegeld for one order: catalogue plus deposits returned. | `order_id` (required) |
-| `jumbo_get_stamps` | Digital stamps, active saving (spaar) campaigns, buying-stamps balance. | — |
+| `jumbo_get_stamps` | Digital stamps, active saving (spaar) campaigns, buying-stamps balance. | None |
 
 ---
 
