@@ -19,6 +19,10 @@ import {
   Basket,
   DepositsResult,
   StampsResult,
+  PromoDigest,
+  PromoDigestEntry,
+  DigestPromotion,
+  DigestAccountOffer,
 } from "./types.js";
 
 const GRAPHQL_URL = "https://www.jumbo.com/api/graphql";
@@ -916,6 +920,310 @@ export class JumboClient {
     };
   }
 
+  /**
+   * Keyword product search used by the promo digest. Selects the offer-bearing
+   * fields `SearchProductDetails` proves exist on `Product` (price, unit price,
+   * promotions with validity + volume discounts) — nothing invented.
+   */
+  private async searchProductForDigest(term: string): Promise<any | null> {
+    const q = `
+    query PromoDigestSearch($input: ProductSearchInput!) {
+      searchProducts(input: $input) {
+        count
+        products {
+          sku
+          title
+          link
+          category: rootCategory
+          price {
+            price
+            promoPrice
+            pricePerUnit {
+              price
+              unit
+            }
+          }
+          availability {
+            isAvailable
+          }
+          promotions {
+            id
+            group
+            tags {
+              text
+            }
+            start {
+              date
+            }
+            end {
+              date
+            }
+            durationTexts {
+              shortTitle
+            }
+            volumeDiscounts {
+              discount
+              volume
+            }
+            maxPromotionQuantity
+          }
+        }
+      }
+    }
+    `;
+    const res = await this.executeGraphql<any>(
+      q,
+      { input: { searchType: "KEYWORD", searchTerms: term } },
+      "JUMBO_WEB-loyalty"
+    );
+    const products = res?.searchProducts?.products;
+    return Array.isArray(products) && products.length > 0 ? products[0] : null;
+  }
+
+  /** Personalised, account-level offers (not tied to one product). */
+  private async getAccountOffers(): Promise<DigestAccountOffer[]> {
+    const q = `
+    query PromoDigestCustomerPromotions {
+      getCustomerPromotions {
+        id
+        active
+        canBeRedeemed
+        description
+        expirationDate
+        eurosDiscount
+        percentageDiscount
+        minimumSpent
+        startDate
+        title
+      }
+    }
+    `;
+    const res = await this.executeGraphql<any>(q, undefined, "JUMBO_WEB-loyalty");
+    const list = res?.getCustomerPromotions;
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((p: any) => p && p.active !== false)
+      .slice(0, 25)
+      .map((p: any) => ({
+        id: p.id ?? null,
+        title: p.title ?? null,
+        description: p.description ?? null,
+        euros_discount: p.eurosDiscount ?? null,
+        percentage_discount: p.percentageDiscount ?? null,
+        minimum_spent: p.minimumSpent ?? null,
+        expires_on: p.expirationDate ?? null,
+      }));
+  }
+
+  /** Shape one mined term into a digest row. Pure mapping — no I/O. */
+  private toDigestEntry(term: string, timesBought: number, p: any): PromoDigestEntry {
+    const rawPromos = Array.isArray(p?.promotions) ? p.promotions : [];
+    const promoTypes: string[] = [];
+    const promotions: DigestPromotion[] = rawPromos.map((pr: any) => {
+      const tags: string[] = (pr?.tags || [])
+        .map((t: any) => t?.text)
+        .filter((t: any): t is string => typeof t === "string" && t.length > 0);
+      for (const t of tags) if (!promoTypes.includes(t)) promoTypes.push(t);
+      return {
+        id: pr?.id ?? null,
+        group: pr?.group ?? null,
+        tags,
+        short_title: pr?.durationTexts?.shortTitle ?? null,
+        starts_on: pr?.start?.date ?? null,
+        ends_on: pr?.end?.date ?? null,
+        volume_discounts: (pr?.volumeDiscounts || []).map((v: any) => ({
+          discount: v?.discount ?? null,
+          volume: v?.volume ?? null,
+        })),
+        max_promotion_quantity: pr?.maxPromotionQuantity ?? null,
+      };
+    });
+
+    const was = p?.price?.price ?? null;
+    const now = p?.price?.promoPrice ?? null;
+    const discount = was !== null && now !== null && now < was ? was - now : null;
+    const pct = discount !== null && was ? Math.round((discount / was) * 100) : null;
+    const starts = promotions.map((x) => x.starts_on).filter((d): d is string => !!d).sort();
+    const ends = promotions.map((x) => x.ends_on).filter((d): d is string => !!d).sort();
+
+    return {
+      term,
+      times_bought: timesBought,
+      product: p
+        ? {
+            sku: p.sku ?? "",
+            title: p.title ?? "",
+            url: p.link ? `https://www.jumbo.com${p.link}` : "",
+            category: p.category ?? null,
+          }
+        : null,
+      was_price: was,
+      now_price: now,
+      discount,
+      discount_percent: pct,
+      unit_price: p?.price?.pricePerUnit?.price ?? null,
+      unit: p?.price?.pricePerUnit?.unit ?? null,
+      promo_types: promoTypes,
+      promotions,
+      is_available: p?.availability?.isAvailable ?? false,
+      valid_from: starts.length > 0 ? starts[0] : null,
+      valid_until: ends.length > 0 ? ends[ends.length - 1] : null,
+    };
+  }
+
+  /**
+   * Small jittered pause between digest API calls (120-200ms). The digest issues
+   * back-to-back requests — up to one per scanned receipt plus one search per
+   * frequent term — so this keeps the mine from hammering Jumbo's API in a burst.
+   * Timing only; results stay deterministic.
+   */
+  private async digestPause(): Promise<void> {
+    const ms = 120 + Math.floor(Math.random() * 80);
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * "Of the things I actually buy, what is on offer right now?"
+   *
+   * Read-only and deterministic: mines recent receipts for purchase frequency,
+   * resolves each frequent basket term to a current assortment product via
+   * `searchProducts`, and reports the offer price/validity the product carries.
+   * Side-effect free — it never writes, never builds a basket, never checks out.
+   */
+  async getPromoDigest(
+    options: {
+      days?: number;
+      minTimes?: number;
+      limit?: number;
+      category?: string;
+      /** Hard cap on receipt-detail fetches (one request per receipt). */
+      maxReceipts?: number;
+    } = {}
+  ): Promise<PromoDigest> {
+    const days = options.days ?? 90;
+    const minTimes = options.minTimes ?? 2;
+    const limit = options.limit ?? 25;
+    const category = options.category?.trim() ? options.category.trim().toLowerCase() : null;
+    const maxReceipts = Math.max(1, options.maxReceipts ?? 40);
+    const notes: string[] = [];
+
+    // ---- 1. mine recent receipts for what the customer actually buys
+    const cutoff = Date.now() - days * 86_400_000;
+    const PAGE = 25;
+    const receipts: ReceiptOverviewItem[] = [];
+    let available = 0;
+    for (let page = 0; page < 10 && receipts.length < maxReceipts; page++) {
+      let overview: { total_results: number; receipts: ReceiptOverviewItem[] };
+      try {
+        overview = await this.listReceipts(page, PAGE);
+      } catch (e: any) {
+        notes.push(`receipt lookup stopped at page ${page}: ${e.message}`);
+        break;
+      }
+      available = overview.total_results ?? available;
+      if (!overview.receipts.length) break;
+      let stop = false;
+      for (const r of overview.receipts) {
+        const t = Date.parse(r.datetime);
+        if (!Number.isNaN(t) && t < cutoff) {
+          stop = true;
+          break;
+        }
+        receipts.push(r);
+        if (receipts.length >= maxReceipts) {
+          stop = true;
+          break;
+        }
+      }
+      if (stop) break;
+    }
+
+    // ---- 2. count distinct basket terms across those receipts
+    const counts = new Map<string, { display: string; n: number }>();
+    for (const r of receipts) {
+      let d: ReceiptDetails;
+      try {
+        await this.digestPause();
+        d = await this.getReceiptDetails(r.transaction_id);
+      } catch {
+        continue;
+      }
+      for (const item of d.items) {
+        const key = normalizeTerm(item.name);
+        if (!key) continue;
+        const existing = counts.get(key);
+        if (existing) existing.n++;
+        else counts.set(key, { display: item.name.trim(), n: 1 });
+      }
+    }
+
+    const frequent = [...counts.values()]
+      .filter((e) => e.n >= minTimes)
+      .sort((a, b) => b.n - a.n || a.display.localeCompare(b.display));
+
+    // ---- 3. resolve each frequent term and keep the ones currently on offer
+    const matched: PromoDigestEntry[] = [];
+    const notMatched: string[] = [];
+    for (const f of frequent) {
+      let product: any = null;
+      try {
+        await this.digestPause();
+        product = await this.searchProductForDigest(f.display);
+      } catch {
+        product = null;
+      }
+      const entry = this.toDigestEntry(f.display, f.n, product);
+      if (category) {
+        const cat = (entry.product?.category || "").toLowerCase();
+        if (!cat.includes(category)) continue; // out of the requested category
+      }
+      if (entry.product && entry.promo_types.length > 0) matched.push(entry);
+      else notMatched.push(f.display);
+    }
+
+    matched.sort(
+      (a, b) =>
+        b.times_bought - a.times_bought ||
+        (b.discount ?? 0) - (a.discount ?? 0) ||
+        a.term.localeCompare(b.term)
+    );
+    const limited = matched.slice(0, limit);
+
+    // ---- 4. supplementary account-level offers
+    let accountOffers: DigestAccountOffer[] = [];
+    try {
+      accountOffers = await this.getAccountOffers();
+    } catch (e: any) {
+      notes.push(`customer promotions unavailable: ${e.message}`);
+    }
+
+    notes.push(
+      `Resolution is one keyword search per frequent term; the top hit is used. ${frequent.length} frequent term(s) scanned.`
+    );
+    notes.push(
+      `Receipt mining is capped at the ${maxReceipts} most recent receipt(s) inside ${days} day(s).`
+    );
+
+    return {
+      days,
+      min_times: minTimes,
+      limit,
+      category,
+      matched: limited,
+      not_matched: notMatched,
+      matched_count: limited.length,
+      not_matched_count: notMatched.length,
+      account_offers: accountOffers,
+      scanned: {
+        receipts_scanned: receipts.length,
+        receipts_available: available,
+        distinct_terms: counts.size,
+        frequent_terms: frequent.length,
+      },
+      notes,
+    };
+  }
+
   /** Generic union unwrap: raise on the `*Error` member, enforce the success member. */
   private unwrapUnion<T = any>(
     value: any,
@@ -1224,6 +1532,15 @@ export class JumboClient {
         : null,
     };
   }
+}
+
+/** Receipt terms are compared lowercase, trimmed, ignoring the printed promo marker. */
+function normalizeTerm(name: string): string {
+  return (name || "")
+    .replace(/\s+p\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 const DUTCH_CITIES: Record<string, { lat: number; lon: number }> = {

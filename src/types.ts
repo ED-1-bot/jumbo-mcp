@@ -228,3 +228,79 @@ export interface StampsResult {
   saving_campaigns: StampCampaign[];
   buying_stamps: BuyingStampsBalance | null;
 }
+
+/** ------------------------------------------------------------------ promo digest */
+
+/** A promotion attached to a product in the current assortment. */
+export interface DigestPromotion {
+  id: string | null;
+  group: string | null;
+  /** Human-readable offer labels, e.g. "2e halve prijs". */
+  tags: string[];
+  short_title: string | null;
+  /** `date` fields as returned by the API (dd-mm or ISO-ish); no client parsing. */
+  starts_on: string | null;
+  ends_on: string | null;
+  volume_discounts: { discount: number | null; volume: number | null }[];
+  max_promotion_quantity: number | null;
+}
+
+/** One frequent purchase that is currently on offer (or not). */
+export interface PromoDigestEntry {
+  /** Normalised receipt term this row was mined from. */
+  term: string;
+  /** How many times the term appeared across the scanned receipts. */
+  times_bought: number;
+  /** Resolved assortment product, when search found one. */
+  product: { sku: string; title: string; url: string; category: string | null } | null;
+  /** Regular shelf price in cents. */
+  was_price: number | null;
+  /** Current offer price in cents, when a promotion applies. */
+  now_price: number | null;
+  /** Cents saved vs. the shelf price. */
+  discount: number | null;
+  discount_percent: number | null;
+  /** Unit (per kg/l/piece) price in cents for the offer, when returned. */
+  unit_price: number | null;
+  unit: string | null;
+  /** Offer labels; empty means no current offer. */
+  promo_types: string[];
+  promotions: DigestPromotion[];
+  is_available: boolean;
+  /** Earliest start / latest end across attached promotions (API strings). */
+  valid_from: string | null;
+  valid_until: string | null;
+}
+
+/** Account-level (personalised) offer, not tied to a single product. */
+export interface DigestAccountOffer {
+  id: string | null;
+  title: string | null;
+  description: string | null;
+  euros_discount: number | null;
+  percentage_discount: number | null;
+  minimum_spent: number | null;
+  expires_on: string | null;
+}
+
+export interface PromoDigest {
+  days: number;
+  min_times: number;
+  limit: number;
+  category: string | null;
+  /** Frequent terms that currently carry at least one promotion. */
+  matched: PromoDigestEntry[];
+  /** Frequent terms with no current offer (or that could not be resolved). */
+  not_matched: string[];
+  matched_count: number;
+  not_matched_count: number;
+  /** Personalised account offers, supplementary context only. */
+  account_offers: DigestAccountOffer[];
+  scanned: {
+    receipts_scanned: number;
+    receipts_available: number;
+    distinct_terms: number;
+    frequent_terms: number;
+  };
+  notes: string[];
+}

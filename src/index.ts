@@ -595,6 +595,55 @@ async function startServer(): Promise<void> {
     }
   );
 
+  // Tool: Promo Digest (read-only)
+  server.tool(
+    "jumbo_get_promo_digest",
+    "Answer \"of the things I actually buy, what is on offer right now?\". " +
+      "Mines recent receipts for purchase frequency, resolves each frequent item to a current " +
+      "assortment product, and reports the offer price (was/now), discount, promo type, validity " +
+      "window and unit price for everything currently promoted. Read-only: no writes, no basket, " +
+      "no checkout, no order or payment operations.",
+    {
+      days: z
+        .number()
+        .int()
+        .positive()
+        .max(365)
+        .default(90)
+        .describe("How many days of receipts to mine (default 90)"),
+      min_times: z
+        .number()
+        .int()
+        .positive()
+        .default(2)
+        .describe("Minimum times a product must have been bought to count as frequent (default 2)"),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(100)
+        .default(25)
+        .describe("Maximum offers to return (default 25)"),
+      category: z
+        .string()
+        .optional()
+        .describe("Optional category filter (case-insensitive substring of the product category)"),
+    },
+    async ({ days, min_times, limit, category }) => {
+      try {
+        const digest = await client.getPromoDigest({
+          days,
+          minTimes: min_times,
+          limit,
+          category,
+        });
+        return { content: [{ type: "text", text: JSON.stringify(digest, null, 2) }] };
+      } catch (error: any) {
+        return toolError(error);
+      }
+    }
+  );
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

@@ -40,6 +40,7 @@ This server enables AI assistants (Claude Desktop, Cursor, Antigravity, OpenClaw
 | `jumbo_search_stores` | Search nearby Jumbo supermarket stores by city, address, or geographic coordinates (latitude, longitude). Returns address, distance, opening hours, and facilities. | `query` (optional), `latitude` (optional), `longitude` (optional) |
 | `jumbo_search_products` | Search the entire Jumbo supermarket grocery catalog by keyword. Returns matching products, current prices, promotional discounts, unit prices, product links, and SKUs. | `query` (required), `sort` (optional: `'PRICE_ASC'` or `'PRICE_DESC'`), `limit` (default: `20`, max: `30`) |
 | `jumbo_get_product_recommendations` | Get product recommendations, alternatives, and cross-sell suggestions by SKU or search keyword, or retrieve current weekly promotional recommendations. | `sku` (optional), `query` (optional), `promotions_only` (optional, default: `false`) |
+| `jumbo_get_promo_digest` | **Read-only.** "Of the things I actually buy, what is on offer right now?" Mines recent receipts for purchase frequency, resolves each frequent item to a current product, and reports offer price (was/now), discount, promo type, validity window and unit price, plus `matched_count` and a `not_matched` list. | `days` (default: `90`), `min_times` (default: `2`), `limit` (default: `25`), `category` (optional) |
 
 ---
 
@@ -141,7 +142,56 @@ npx jumbo-mcp status
 
 ---
 
-## Client Integration
+## Promo digest (read-only)
+
+`jumbo_get_promo_digest` answers "of the things I actually buy, what is on offer right now?" — without asking the user to name a product.
+
+How it works, in order:
+
+1. **Mine receipts.** `receiptOverview` + `receipt` for the most recent receipts inside `days`, normalising each line item to a basket term and counting occurrences. Capped at **40** receipt-detail fetches (one request per receipt), with a small **120–200ms jittered pause between calls** so the mine does not burst the API.
+2. **Keep frequent terms.** Terms bought at least `min_times` times, sorted by frequency.
+3. **Resolve each term** with one keyword `searchProducts` call (top hit), also jitter-paced, and keep the products that currently carry a promotion.
+4. **Attach account offers.** `getCustomerPromotions` is reported separately as `account_offers` — it is not tied to a single product, so it is never faked into a per-product match.
+
+```json
+{
+  "days": 90, "min_times": 2, "limit": 25, "category": null,
+  "matched_count": 1,
+  "matched": [
+    {
+      "term": "Halfvolle melk", "times_bought": 2,
+      "product": { "sku": "SKU-MELK", "title": "Jumbo Halfvolle melk 1L", "url": "https://www.jumbo.com/producten/halfvolle-melk", "category": "Zuivel, eieren, boter" },
+      "was_price": 219, "now_price": 169, "discount": 50, "discount_percent": 23,
+      "unit_price": 169, "unit": "L",
+      "promo_types": ["2e halve prijs"],
+      "valid_from": "2026-10-13", "valid_until": "2026-10-19",
+      "is_available": true
+    }
+  ],
+  "not_matched": ["Bananen"],
+  "not_matched_count": 1,
+  "account_offers": [ { "id": "cp1", "title": "Persoonlijke korting", "euros_discount": 300, "minimum_spent": 2500, "expires_on": "2026-10-31" } ],
+  "scanned": { "receipts_scanned": 2, "receipts_available": 2, "distinct_terms": 3, "frequent_terms": 2 },
+  "notes": [ "Resolution is one keyword search per frequent term; the top hit is used. 2 frequent term(s) scanned." ]
+}
+```
+
+- Prices are **integer cents** to match the rest of this server.
+- **`matched` requires a promotion tag.** A product is only reported as matched when its assortment entry carries at least one `promotions` tag. A product with `promoPrice < price` but **no** `promotions` entry is treated as **not on offer** and lands in `not_matched` — the digest does not infer an offer from a price drop alone.
+- `not_matched` lists frequent purchases with **no current offer** (or that could not be resolved) — never silently dropped.
+- **Throttling.** Receipt-detail fetches and per-term searches are separated by a jittered 120–200ms pause (`digestPause`, `src/client.ts`), alongside the 40-receipt cap. Pick-up cost is a slower digest on large histories; correctness is unaffected.
+- Deterministic and side-effect free: read queries only; no writes, no basket, no checkout, no order or payment operations.
+- `notes` reports partial failures (receipts, product search, customer promotions) instead of aborting the whole digest.
+
+### What is *not* verified
+
+- `PromoDigestSearch` selects `category: rootCategory`, `start { date }`, `end { date }`, `durationTexts { shortTitle }`, `volumeDiscounts { discount volume }` and `maxPromotionQuantity` — these come from the app's `SearchProductDetails` fragment (`Product.promotions`), but the **combined** selection has not been sent live.
+- Receipt line-item parsing is the existing heuristic parser (`OMSCHRIJVING` ... `Totaal`), so oddly formatted receipts yield fewer terms rather than an error.
+- Product resolution is a **single keyword search, top hit**; there is no SKU-level reconciliation between the receipt text and the assortment item.
+- `getCustomerPromotions` field set is taken verbatim from the teardown; whether it needs arguments for a personalised payload is unconfirmed (it is called argument-less, matching the app).
+- `matched`/`not_matched` reflect the promotion data the assortment API carries today; this is a snapshot, not a scheduled push.
+
+
 
 ### Claude Desktop
 Add this to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS or `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
