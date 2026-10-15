@@ -4,6 +4,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import * as dotenv from "dotenv";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { JumboClient, JumboShoppingListError } from "./client.js";
 import {
   decodeJwtPayload,
@@ -93,7 +96,11 @@ async function showStatus(): Promise<void> {
   }
 }
 
-async function startServer(): Promise<void> {
+/**
+ * Build the MCP server with all tools registered. Exported so tests can drive
+ * the real handler over an in-memory transport.
+ */
+export function createServer(): McpServer {
   const server = new McpServer({
     name: "jumbo-mcp",
     version: "0.1.0",
@@ -644,6 +651,11 @@ async function startServer(): Promise<void> {
     }
   );
 
+  return server;
+}
+
+async function startServer(): Promise<void> {
+  const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -661,7 +673,20 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  process.stderr.write(`Fatal error: ${err.message}\n`);
-  process.exit(1);
-});
+// Only auto-run when executed directly (not when imported by tests).
+const isDirectRun = (() => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return fs.realpathSync(path.resolve(entry)) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectRun) {
+  main().catch((err) => {
+    process.stderr.write(`Fatal error: ${err.message}\n`);
+    process.exit(1);
+  });
+}
