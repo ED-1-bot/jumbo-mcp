@@ -356,6 +356,42 @@ export class JumboClient {
     };
   }
 
+  /**
+   * Candidate `transactionId` values to try against `receipt(transactionId:)`.
+   *
+   * `receiptOverview` (what `listReceipts` reads) hands back the receipt's
+   * storage key -- `<opaque>-<uuid>.json` -- and that key is what the app threads
+   * through `/bonnetjes/:digitalReceiptId` into `getDigitalReceipt`. The detail
+   * endpoint has been observed to resolve on one of the canonical segments of
+   * that key rather than the whole key, and there is no mapping endpoint to ask
+   * which one. Instead of hard-failing on whichever single form the caller
+   * happened to pass, try every form that key can denote.
+   *
+   * Order matters: the exact key first (that is the value the app sends), then
+   * the same key without its `.json` suffix, then the bare UUID, then the bare
+   * opaque prefix. Blanks and duplicates are dropped.
+   */
+  static receiptIdCandidates(input: string): string[] {
+    const out: string[] = [];
+    const push = (v: string) => {
+      const s = (v || "").trim();
+      if (s && !out.includes(s)) out.push(s);
+    };
+    const raw = (input || "").trim();
+    push(raw);
+    const stem = raw.replace(/\.json$/i, "");
+    push(stem);
+    const m =
+      /^(.+)-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/.exec(
+        stem
+      );
+    if (m) {
+      push(m[2]);
+      push(m[1]);
+    }
+    return out;
+  }
+
   async getReceiptDetails(transactionId: string): Promise<ReceiptDetails> {
     const q = `
     query GetDigitalReceipt($transactionId: String) {
@@ -392,14 +428,28 @@ export class JumboClient {
       }
     }
     `;
-    const data = await this.executeGraphql<any>(
-      q,
-      { transactionId },
-      "JUMBO_WEB-orders"
-    );
-    const receipt = data?.receipt;
+    // Try each id form the storage key can denote. A null `receipt` is the API
+    // saying "no such transaction under this id" -- a rejected request would
+    // have thrown from executeGraphql instead -- so it is safe to fall through
+    // to the next form. Any real failure propagates unchanged.
+    const candidates = JumboClient.receiptIdCandidates(transactionId);
+    let receipt: any = null;
+    for (const candidate of candidates) {
+      const data = await this.executeGraphql<any>(
+        q,
+        { transactionId: candidate },
+        "JUMBO_WEB-orders"
+      );
+      if (data?.receipt) {
+        receipt = data.receipt;
+        break;
+      }
+    }
     if (!receipt) {
-      throw new Error(`Receipt not found for transactionId: ${transactionId}`);
+      throw new Error(
+        `Receipt not found for transactionId: ${transactionId} ` +
+          `(tried ${candidates.length} id form(s): ${candidates.join(", ")})`
+      );
     }
 
     const rawImage = receipt.receiptImage?.image || "{}";
