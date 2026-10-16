@@ -665,7 +665,9 @@ async function main() {
   const cmd = args[0]?.toLowerCase();
 
   if (cmd === "login") {
-    await loginCli();
+    const manual = args.includes("--manual");
+    const save = args.includes("--save");
+    await loginCli({ manual, save });
   } else if (cmd === "status") {
     await showStatus();
   } else {

@@ -23,17 +23,28 @@ npm run build
 ```
 
 ### 2. Authentication (One-time setup)
-One-time login through Jumbo's official Auth0 page. The server stores a persistent refresh token locally in `~/.config/jumbo-mcp/tokens.json` and renews access tokens automatically.
 
+Run the automated login wizard:
 ```bash
-npm run login     # opens browser; paste redirected jumbo://callbacks/... URL back
-npm run status    # verify active connection and loyalty points
+npm run login     # opens Chrome, solves Turnstile automatically, and captures the callback
 ```
 
-**Headless host (Docker, systemd, remote gateway):** copy `~/.config/jumbo-mcp/tokens.json` to the host, or set the environment variable directly:
+Upon successful login, the CLI prints your permanent refresh token directly in the terminal:
+```text
+JUMBO_REFRESH_TOKEN=v1.MbOzCg2...
+```
+
+Add this line directly to your `.env` file or environment:
 ```bash
 JUMBO_REFRESH_TOKEN="your_refresh_token_here"
 ```
+
+Verify your active connection and loyalty balance:
+```bash
+npm run status    # verify active connection and loyalty points
+```
+
+*(Optional: If you want tokens saved to disk instead of using environment variables, run `npm run login -- --save`)*
 
 ---
 
@@ -47,7 +58,10 @@ Add the compiled server to your MCP client config:
   "mcpServers": {
     "jumbo": {
       "command": "node",
-      "args": ["/ABSOLUTE/PATH/TO/jumbo-mcp/dist/index.js"]
+      "args": ["/ABSOLUTE/PATH/TO/jumbo-mcp/dist/index.js"],
+      "env": {
+        "JUMBO_REFRESH_TOKEN": "your_refresh_token_here"
+      }
     }
   }
 }
@@ -69,7 +83,10 @@ Then use:
 {
   "mcpServers": {
     "jumbo": {
-      "command": "jumbo-mcp"
+      "command": "jumbo-mcp",
+      "env": {
+        "JUMBO_REFRESH_TOKEN": "your_refresh_token_here"
+      }
     }
   }
 }
@@ -83,7 +100,7 @@ A multi-stage [`Dockerfile`](Dockerfile) is included for containerized environme
 docker build -t jumbo-mcp .
 ```
 
-Run with mounted credentials:
+Run with `JUMBO_REFRESH_TOKEN`:
 ```json
 {
   "mcpServers": {
@@ -93,8 +110,8 @@ Run with mounted credentials:
         "run",
         "-i",
         "--rm",
-        "-v",
-        "${HOME}/.config/jumbo-mcp:/root/.config/jumbo-mcp",
+        "-e",
+        "JUMBO_REFRESH_TOKEN=your_refresh_token_here",
         "jumbo-mcp"
       ]
     }

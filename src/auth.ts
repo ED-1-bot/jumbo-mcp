@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
 import { exec } from "node:child_process";
+import * as https from "node:https";
+import { fileURLToPath } from "node:url";
 import { TokensData, PkceSession } from "./types.js";
 
 export const AUTH_CONFIG = {
@@ -79,18 +81,40 @@ export function assertUsableAccessToken(accessToken: string): void {
   }
 }
 
+export function getProjectDir(): string {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const candidate = path.resolve(here, "..");
+    if (fs.existsSync(path.join(candidate, "package.json"))) {
+      return candidate;
+    }
+  } catch {
+    // Ignore
+  }
+  return process.cwd();
+}
+
 export function getTokensFilePath(): string {
   const envPath = process.env.JUMBO_TOKENS_FILE;
   if (envPath) return path.resolve(envPath.replace(/^~/, os.homedir()));
 
-  const primary = path.join(os.homedir(), ".config", "jumbo-mcp", "tokens.json");
-  if (fs.existsSync(primary)) return primary;
+  // 1. Primary: tokens.json in project root
+  const projectFile = path.join(getProjectDir(), "tokens.json");
+  if (fs.existsSync(projectFile)) return projectFile;
 
-  // Fallback to legacy path if present
+  // 2. Working directory tokens.json
+  const cwdFile = path.resolve(process.cwd(), "tokens.json");
+  if (fs.existsSync(cwdFile)) return cwdFile;
+
+  // 3. Fallback to global config (~/.config/jumbo-mcp/tokens.json) if it exists
+  const globalConfig = path.join(os.homedir(), ".config", "jumbo-mcp", "tokens.json");
+  if (fs.existsSync(globalConfig)) return globalConfig;
+
+  // 4. Fallback to legacy path if present
   const legacy = path.join(os.homedir(), ".gemini", "config", "jumbo-mcp", "tokens.json");
   if (fs.existsSync(legacy)) return legacy;
 
-  return primary;
+  return projectFile;
 }
 
 export function getSessionFilePath(): string {
@@ -200,10 +224,118 @@ export function buildAuthorizeUrl(
   return { url, session };
 }
 
+/**
+ * Resilient fetch for Auth0 token requests. Tries native fetch first, but if
+ * that fails (e.g. EBADF in Node 26 on Darwin during child process cleanup),
+ * falls back to node:https, and finally to system curl to guarantee success.
+ */
+async function authFetch(
+  urlStr: string,
+  options: { method: string; headers: Record<string, string>; body?: string }
+): Promise<{ ok: boolean; status: number; text: () => Promise<string>; json: () => Promise<any> }> {
+  let lastErr: any = null;
+
+  // 1. Try global fetch (with quick retry on transient socket errors, except EBADF)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await fetch(urlStr, options);
+    } catch (err: any) {
+      lastErr = err;
+      const isEbadf =
+        err?.message?.includes("EBADF") ||
+        err?.cause?.code === "EBADF" ||
+        err?.cause?.message?.includes("EBADF");
+      if (isEbadf) break; // Don't retry broken socket in undici, switch to fallbacks immediately
+      await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+    }
+  }
+
+  // 2. Try node:https with isolated agent (keepAlive disabled)
+  try {
+    return await new Promise((resolve, reject) => {
+      const parsed = new URL(urlStr);
+      const postData = options.body || "";
+      const reqHeaders = {
+        ...options.headers,
+        "Content-Length": String(Buffer.byteLength(postData)),
+      };
+
+      const agent = new https.Agent({ keepAlive: false });
+      const req = https.request(
+        parsed,
+        {
+          method: options.method || "POST",
+          headers: reqHeaders,
+          agent,
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            const body = Buffer.concat(chunks).toString("utf-8");
+            resolve({
+              ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300,
+              status: res.statusCode || 0,
+              text: async () => body,
+              json: async () => JSON.parse(body),
+            });
+          });
+        }
+      );
+      req.on("error", (e) => reject(e));
+      req.write(postData);
+      req.end();
+    });
+  } catch (httpsErr: any) {
+    lastErr = httpsErr;
+  }
+
+  // 3. Fallback to system curl (runs in isolated process, immune to parent libuv descriptor issues)
+  try {
+    const { execFile } = await import("node:child_process");
+    return await new Promise((resolve, reject) => {
+      const delimiter = "---HTTP_STATUS---";
+      const args = [
+        "-s",
+        "-S",
+        "-X",
+        options.method || "POST",
+        "-w",
+        `${delimiter}%{http_code}`,
+        urlStr,
+      ];
+      for (const [k, v] of Object.entries(options.headers || {})) {
+        args.push("-H", `${k}: ${v}`);
+      }
+      if (options.body) {
+        args.push("-d", options.body);
+      }
+      execFile("curl", args, (err, stdout, stderr) => {
+        if (err) {
+          return reject(new Error(`curl failed: ${err.message} (${stderr})`));
+        }
+        const idx = stdout.lastIndexOf(delimiter);
+        const body = idx >= 0 ? stdout.slice(0, idx) : stdout;
+        const statusStr = idx >= 0 ? stdout.slice(idx + delimiter.length).trim() : "0";
+        const statusCode = parseInt(statusStr, 10) || 0;
+        resolve({
+          ok: statusCode >= 200 && statusCode < 300,
+          status: statusCode,
+          text: async () => body,
+          json: async () => JSON.parse(body),
+        });
+      });
+    });
+  } catch (curlErr: any) {
+    throw lastErr || curlErr;
+  }
+}
+
 export async function exchangeCode(
   codeOrUrl: string,
   state?: string,
-  verifierOverride?: string
+  verifierOverride?: string,
+  opts: { save?: boolean } = {}
 ): Promise<TokensData> {
   let code = codeOrUrl.trim();
   if (code.startsWith("jumbo://") || code.includes("?")) {
@@ -253,7 +385,7 @@ export async function exchangeCode(
     scope: DEFAULT_SCOPE,
   };
 
-  const resp = await fetch(tokenUrl, {
+  const resp = await authFetch(tokenUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -272,7 +404,9 @@ export async function exchangeCode(
   tokens.domain = domain;
   tokens.client_id = clientId;
 
-  saveTokens(tokens);
+  if (opts.save) {
+    saveTokens(tokens);
+  }
 
   if (fs.existsSync(sessPath)) {
     try {
@@ -316,7 +450,7 @@ export async function refreshTokens(existing?: TokensData): Promise<TokensData> 
     scope: DEFAULT_SCOPE,
   };
 
-  const resp = await fetch(tokenUrl, {
+  const resp = await authFetch(tokenUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -357,7 +491,9 @@ export async function getValidAccessToken(
   // now-stale JUMBO_TOKEN.
   if (!opts.ignoreEnvOverride) {
     const tokenOverride = process.env.JUMBO_TOKEN;
-    if (tokenOverride) return tokenOverride.trim();
+    if (tokenOverride && tokenOverride.trim() && tokenOverride.trim() !== "<UNKNOWN>") {
+      return tokenOverride.trim();
+    }
   }
 
   const tokens = loadTokens();
@@ -414,52 +550,204 @@ function openInBrowser(url: string) {
   }
 }
 
-export async function loginCli(): Promise<void> {
+let stealthConfigured = false;
+
+export async function loginWithBrowser(
+  url: string
+): Promise<{ redirectUrl: string; close: () => Promise<void> } | null> {
+  let chromium: any;
+  try {
+    const pwe = await import("playwright-extra");
+    const stealthMod = await import("puppeteer-extra-plugin-stealth");
+    const stealth = (stealthMod as any).default || stealthMod;
+    chromium = pwe.chromium;
+    if (!stealthConfigured) {
+      chromium.use(stealth());
+      stealthConfigured = true;
+    }
+  } catch {
+    try {
+      const pw = await import("playwright");
+      chromium = pw.chromium;
+    } catch {
+      return null;
+    }
+  }
+
+  const profileDir = path.join(os.homedir(), ".config", "jumbo-mcp", "browser_profile");
+  try {
+    fs.mkdirSync(profileDir, { recursive: true });
+  } catch {
+    // Ignore
+  }
+
+  const isHeadless = process.env.JUMBO_HEADLESS === "true" || process.env.CI === "true";
+
+  const launchOptions = {
+    headless: isHeadless,
+    ignoreDefaultArgs: ["--enable-automation"],
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-infobars",
+      "--no-sandbox",
+    ],
+    viewport: { width: 1280, height: 800 },
+  };
+
+  let context: any = null;
+  try {
+    try {
+      context = await chromium.launchPersistentContext(profileDir, {
+        channel: "chrome",
+        ...launchOptions,
+      });
+    } catch {
+      context = await chromium.launchPersistentContext(profileDir, launchOptions);
+    }
+
+    const page = context.pages()[0] || (await context.newPage());
+
+    console.log("\n🌐 Opening Jumbo login in Chrome...");
+    console.log("👉 Please sign in to your Jumbo account in the browser window.");
+    console.log("   (Your redirect callback will be captured automatically — no copy/paste needed!)\n");
+
+    return await new Promise<{ redirectUrl: string; close: () => Promise<void> } | null>((resolve) => {
+      let resolved = false;
+
+      const closeHandler = async () => {
+        try {
+          await context?.close();
+        } catch {
+          // Ignore
+        }
+      };
+
+      const handleUrl = (targetUrl: string) => {
+        if (
+          !resolved &&
+          (targetUrl.startsWith("jumbo://callbacks/login") ||
+            targetUrl.startsWith("jumbo://callbacks/mfa"))
+        ) {
+          resolved = true;
+          console.log("⚡ Captured OAuth redirect callback automatically!");
+          // Keep browser alive until exchangeCode finishes so process cleanup does not cause EBADF
+          resolve({ redirectUrl: targetUrl, close: closeHandler });
+        }
+      };
+
+      page.on("request", (req: any) => handleUrl(req.url()));
+      page.on("requestfailed", (req: any) => handleUrl(req.url()));
+      page.on("framenavigated", (frame: any) => {
+        if (frame === page.mainFrame()) {
+          handleUrl(frame.url());
+        }
+      });
+
+      page.on("close", () => {
+        if (!resolved) {
+          resolved = true;
+          resolve(null);
+        }
+      });
+
+      context.on("close", () => {
+        if (!resolved) {
+          resolved = true;
+          resolve(null);
+        }
+      });
+
+      page.goto(url).catch(() => {
+        // Navigating to custom scheme might throw in page.goto, which is expected
+      });
+    });
+  } catch (err: any) {
+    if (context) {
+      try {
+        await context.close();
+      } catch {
+        // Ignore
+      }
+    }
+    return null;
+  }
+}
+
+export async function loginCli(opts: { manual?: boolean; save?: boolean } = {}): Promise<void> {
   const { url } = buildAuthorizeUrl();
 
   console.log("\n" + "=".repeat(70));
   console.log("🚀 JUMBO MCP - AUTHENTICATION");
   console.log("=".repeat(70));
-  console.log("\nOpening your browser to log in to Jumbo...");
-  console.log(`\nIf the browser does not open automatically, visit this URL:\n\n${url}\n`);
-
-  try {
-    openInBrowser(url);
-  } catch {
-    // Ignore
-  }
-
-  console.log("=".repeat(70));
-  console.log("INSTRUCTIONS:");
-  console.log("1. Sign in to your Jumbo account in the browser.");
-  console.log("2. When finished, the browser will attempt to redirect to:");
-  console.log("   jumbo://callbacks/login?code=XXXX&state=YYYY");
-  console.log("   (The browser might show 'Address invalid' or 'Cannot open' - that is normal!)");
-  console.log("3. Copy the full address from your browser's address bar and paste it below.\n");
-
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
 
   let redirectInput = "";
-  try {
-    redirectInput = await rl.question("Paste redirect URL (or code): ");
-  } finally {
-    rl.close();
+  let browserSession: { redirectUrl: string; close: () => Promise<void> } | null = null;
+
+  if (!opts.manual) {
+    try {
+      browserSession = await loginWithBrowser(url);
+      if (browserSession) {
+        redirectInput = browserSession.redirectUrl;
+      }
+    } catch {
+      // Fallback
+    }
+  }
+
+  if (!redirectInput) {
+    console.log("\nOpening your browser to log in to Jumbo...");
+    console.log(`\nIf the browser does not open automatically, visit this URL:\n\n${url}\n`);
+
+    try {
+      openInBrowser(url);
+    } catch {
+      // Ignore
+    }
+
+    console.log("=".repeat(70));
+    console.log("INSTRUCTIONS:");
+    console.log("1. Sign in to your Jumbo account in the browser.");
+    console.log("2. When finished, the browser will attempt to redirect to:");
+    console.log("   jumbo://callbacks/login?code=XXXX&state=YYYY");
+    console.log("   (The browser might show 'Address invalid' or 'Cannot open' - that is normal!)");
+    console.log("3. Copy the full address from your browser's address bar and paste it below.\n");
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    try {
+      redirectInput = await rl.question("Paste redirect URL (or code): ");
+    } finally {
+      rl.close();
+    }
   }
 
   redirectInput = redirectInput.trim();
   if (!redirectInput) {
+    if (browserSession) await browserSession.close();
     console.log("No URL or code provided. Login aborted.");
     process.exit(1);
   }
 
+  // Close browser before exchanging tokens so OS pipes and child processes are cleanly reaped
+  if (browserSession) {
+    try {
+      await browserSession.close();
+      browserSession = null;
+    } catch {
+      // Ignore
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+
   console.log("\n🔄 Exchanging code for permanent tokens...");
   try {
-    const tokens = await exchangeCode(redirectInput);
-    console.log("🎉 Successfully authenticated!");
-    console.log(`📁 Tokens saved to: ${getTokensFilePath()}`);
+    const tokens = await exchangeCode(redirectInput, undefined, undefined, { save: opts.save });
+    console.log("\n" + "=".repeat(70));
+    console.log("🎉 SUCCESSFULLY AUTHENTICATED!");
+    console.log("=".repeat(70));
 
     const claims = decodeJwtPayload(tokens.access_token);
     const custId = claims[CUSTOMER_ID_CLAIM];
@@ -467,9 +755,24 @@ export async function loginCli(): Promise<void> {
     if (custId) console.log(`👤 Customer ID: ${custId}`);
     if (email) console.log(`📧 Account:     ${email}`);
 
-    console.log("\nYou are all set! You can now use jumbo-mcp in your AI assistant.");
+    if (tokens.refresh_token) {
+      console.log(`\nJUMBO_REFRESH_TOKEN=${tokens.refresh_token}\n`);
+    }
+
+    if (opts.save) {
+      console.log(`📁 Tokens saved to: ${getTokensFilePath()}`);
+    }
+
+    console.log("You are all set! You can now use jumbo-mcp in your AI assistant.");
   } catch (err: any) {
-    console.error(`❌ Login failed: ${err.message}`);
+    const causeMsg = (err as any)?.cause
+      ? ` (cause: ${(err as any).cause?.message || (err as any).cause?.code || (err as any).cause})`
+      : "";
+    console.error(`❌ Login failed: ${err.message}${causeMsg}`);
     process.exit(1);
+  } finally {
+    if (browserSession) {
+      await browserSession.close();
+    }
   }
 }

@@ -200,6 +200,17 @@ test("getValidAccessToken honours JUMBO_TOKEN unless explicitly ignored", async 
   }
 });
 
+test("getValidAccessToken ignores placeholder <UNKNOWN> in JUMBO_TOKEN", async () => {
+  seed({ access_token: "stored-token", saved_at: new Date().toISOString(), expires_in: 86400 });
+  installFetch(() => json({}));
+  process.env.JUMBO_TOKEN = "<UNKNOWN>";
+  try {
+    assert.equal(await getValidAccessToken(), "stored-token");
+  } finally {
+    delete process.env.JUMBO_TOKEN;
+  }
+});
+
 test("getValidAccessToken surfaces a failed refresh instead of returning a dead token", async () => {
   seed({
     access_token: "expired-token",
