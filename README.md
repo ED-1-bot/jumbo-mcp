@@ -144,7 +144,7 @@ Run with mounted credentials:
 
 ## Notes
 
-- Prices are returned as **integer cents** (e.g. `139` = €1.39).
+- **Prices:** Catalog, basket, deposit, and promo-digest tools return prices as **integer cents** (e.g. `139` = €1.39). Receipt tools (`jumbo_get_receipt_details`, `jumbo_search_receipts`) return prices parsed from the receipt document as **decimal euros** (e.g. `2.19` = €2.19).
 - The shopping-list tools are the only writes. Basket, deposits, stamps and promotion tools are read-only.
 - When Jumbo rejects a call, the tool returns an error payload with Jumbo's own `reason` and `errorMessage` rather than a generic message.
 

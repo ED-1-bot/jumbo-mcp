@@ -240,3 +240,54 @@ test("getReceiptDetails: a hard failure is not swallowed by the fallback loop", 
     /GraphQL Error: boom/
   );
 });
+
+test("receiptIdCandidates: preferredForm promotes the winning form to index 0", () => {
+  assert.deepEqual(JumboClient.receiptIdCandidates(STORAGE_KEY, "uuid"), [
+    "752e67d6-bdb8-11f1-909c-ac190a7f0000",
+    STORAGE_KEY,
+    "23mg1yp18x-752e67d6-bdb8-11f1-909c-ac190a7f0000",
+    "23mg1yp18x",
+  ]);
+  assert.deepEqual(JumboClient.receiptIdCandidates(STORAGE_KEY, "stem"), [
+    "23mg1yp18x-752e67d6-bdb8-11f1-909c-ac190a7f0000",
+    STORAGE_KEY,
+    "752e67d6-bdb8-11f1-909c-ac190a7f0000",
+    "23mg1yp18x",
+  ]);
+});
+
+test("getReceiptDetails: remembers the winning id form so subsequent receipts resolve in 1 request", async () => {
+  const secondKey = "99xyzabc01-11111111-2222-3333-4444-555555555555.json";
+  installFetch((body) => {
+    if (op(body) !== "GetDigitalReceipt") throw new Error("unexpected op " + op(body));
+    const sent = body?.variables?.transactionId;
+    // Endpoint only resolves on bare UUIDs.
+    if (
+      sent === "752e67d6-bdb8-11f1-909c-ac190a7f0000" ||
+      sent === "11111111-2222-3333-4444-555555555555"
+    ) {
+      return json({ data: { receipt: RECEIPT_PAYLOAD } });
+    }
+    return json({ data: { receipt: null } });
+  });
+
+  const client = new JumboClient();
+  // First receipt discovers that "uuid" (candidate #3) is the winning form (3 requests).
+  await client.getReceiptDetails(STORAGE_KEY);
+  const firstCallIds = calls.map((c) => c.body?.variables?.transactionId);
+  assert.deepEqual(firstCallIds, [
+    STORAGE_KEY,
+    "23mg1yp18x-752e67d6-bdb8-11f1-909c-ac190a7f0000",
+    "752e67d6-bdb8-11f1-909c-ac190a7f0000",
+  ]);
+
+  // Second receipt tries the bare UUID first and resolves in a single request.
+  calls = [];
+  const details2 = await client.getReceiptDetails(secondKey);
+  assert.equal(details2.transaction_id, secondKey);
+  assert.deepEqual(
+    calls.map((c) => c.body?.variables?.transactionId),
+    ["11111111-2222-3333-4444-555555555555"]
+  );
+});
+

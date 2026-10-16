@@ -49,7 +49,9 @@ test("no GraphQL document declares a variable it does not use", () => {
   const offenders: string[] = [];
   for (const doc of docs) {
     const body = doc.replace(/(?:query|mutation)\s+\w+\s*(\(([^)]*)\))?/, "");
-    const unused = declaredVariables(doc).filter((v) => !body.includes(`$${v}`));
+    const unused = declaredVariables(doc).filter(
+      (v) => !new RegExp(`\\$${v}\\b`).test(body)
+    );
     if (unused.length > 0) {
       offenders.push(`${operationName(doc)}: unused $${unused.join(", $")}`);
     }

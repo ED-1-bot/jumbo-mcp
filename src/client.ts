@@ -79,9 +79,17 @@ export class JumboSessionInvalidError extends Error {
   }
 }
 
+export type ReceiptIdForm = "raw" | "stem" | "uuid" | "prefix";
+
+const RECEIPT_KEY_UUID_RE =
+  /^(.+)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
 export class JumboClient {
   private userAgent =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+  /** Last candidate form that resolved a receipt on `GetDigitalReceipt`. */
+  private preferredReceiptIdForm: ReceiptIdForm | null = null;
 
   private async getAuthHeaders(accessTokenOverride?: string): Promise<Record<string, string>> {
     // An explicit override (a token we just refreshed) must win over the stored
@@ -367,28 +375,56 @@ export class JumboClient {
    * which one. Instead of hard-failing on whichever single form the caller
    * happened to pass, try every form that key can denote.
    *
-   * Order matters: the exact key first (that is the value the app sends), then
+   * Default order: the exact key first (that is the value the app sends), then
    * the same key without its `.json` suffix, then the bare UUID, then the bare
-   * opaque prefix. Blanks and duplicates are dropped.
+   * opaque prefix. If `preferredForm` is supplied (from a prior hit on this
+   * client), that form is promoted to index 0 so batch callers (`searchReceipts`,
+   * `getPromoDigest`) resolve on the first attempt instead of re-probing.
+   * Blanks and duplicates are dropped.
    */
-  static receiptIdCandidates(input: string): string[] {
-    const out: string[] = [];
-    const push = (v: string) => {
-      const s = (v || "").trim();
-      if (s && !out.includes(s)) out.push(s);
-    };
+  static receiptIdCandidates(
+    input: string,
+    preferredForm?: ReceiptIdForm | null
+  ): string[] {
+    return JumboClient.receiptIdTaggedCandidates(input, preferredForm).map(
+      (c) => c.value
+    );
+  }
+
+  private static receiptIdTaggedCandidates(
+    input: string,
+    preferredForm?: ReceiptIdForm | null
+  ): Array<{ form: ReceiptIdForm; value: string }> {
     const raw = (input || "").trim();
-    push(raw);
+    if (!raw) return [];
+
+    const out: Array<{ form: ReceiptIdForm; value: string }> = [
+      { form: "raw", value: raw },
+    ];
+    const push = (form: ReceiptIdForm, v: string) => {
+      const s = v.trim();
+      if (s && !out.some((c) => c.value === s)) {
+        out.push({ form, value: s });
+      }
+    };
+
     const stem = raw.replace(/\.json$/i, "");
-    push(stem);
-    const m =
-      /^(.+)-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/.exec(
-        stem
-      );
+    push("stem", stem);
+
+    const m = RECEIPT_KEY_UUID_RE.exec(stem);
     if (m) {
-      push(m[2]);
-      push(m[1]);
+      push("uuid", m[2]);
+      push("prefix", m[1]);
     }
+
+    if (preferredForm) {
+      const idx = out.findIndex((c) => c.form === preferredForm);
+      if (idx > 0) {
+        const [promoted] = out.splice(idx, 1);
+        out.unshift(promoted);
+      }
+    }
+
     return out;
   }
 
@@ -431,24 +467,29 @@ export class JumboClient {
     // Try each id form the storage key can denote. A null `receipt` is the API
     // saying "no such transaction under this id" -- a rejected request would
     // have thrown from executeGraphql instead -- so it is safe to fall through
-    // to the next form. Any real failure propagates unchanged.
-    const candidates = JumboClient.receiptIdCandidates(transactionId);
+    // to the next form. Any real failure propagates unchanged. Once a form hits,
+    // remember it so subsequent receipts try the winning form first.
+    const candidates = JumboClient.receiptIdTaggedCandidates(
+      transactionId,
+      this.preferredReceiptIdForm
+    );
     let receipt: any = null;
     for (const candidate of candidates) {
       const data = await this.executeGraphql<any>(
         q,
-        { transactionId: candidate },
+        { transactionId: candidate.value },
         "JUMBO_WEB-orders"
       );
       if (data?.receipt) {
         receipt = data.receipt;
+        this.preferredReceiptIdForm = candidate.form;
         break;
       }
     }
     if (!receipt) {
       throw new Error(
         `Receipt not found for transactionId: ${transactionId} ` +
-          `(tried ${candidates.length} id form(s): ${candidates.join(", ")})`
+          `(tried ${candidates.length} id form(s): ${candidates.map((c) => c.value).join(", ")})`
       );
     }
 
