@@ -1,5 +1,18 @@
 # Jumbo MCP Server Release Notes
 
+## What's New in v0.2.1
+
+### 1. Critical Auth0 Session Refresh & Audience Fix
+* **Token Renewal Audience & Scope**: Fixed a critical issue where the Auth0 `refresh_token` grant omitted the target `audience` and `scope`, resulting in tokens issued without the essential `https://jumbo.com/customerId` claim. This previously caused Jumbo's GraphQL router to reject requests with `401 UNAUTHORIZED Customer ID header is required` / `Customer ID cannot be null or empty`.
+* **Pre-persistence JWT Validation**: Refreshed tokens are now strictly inspected for correct audience (`https://jumbo.com/`) and valid `customerId` claim before persisting to storage.
+* **Mid-flight Token Invalidation Guard**: Stale environment tokens (`JUMBO_TOKEN`) are ignored during active session refresh so they do not override newly minted credentials.
+* **Actionable Session Errors**: Upstream authentication/authorization failures now raise a dedicated `JumboSessionInvalidError` with actionable resolution guidance (`npm run login`) instead of surfacing raw GraphQL errors.
+
+### 2. Test Suite Expansion
+* Added 14 new automated tests covering Auth0 refresh parameter validation, audience/claim rejection guards, and mid-flight token refresh replay behavior (expanding test suite to 82 tests).
+
+---
+
 ## What's New in v0.2.0
 
 ### 1. Shopping List Management & Mutations (Write Operations)
