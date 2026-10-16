@@ -103,7 +103,7 @@ async function showStatus(): Promise<void> {
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "jumbo-mcp",
-    version: "0.2.1",
+    version: "0.2.2",
   });
 
   // Tool: Login (Agent auth verification)

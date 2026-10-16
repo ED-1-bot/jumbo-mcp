@@ -1,5 +1,31 @@
 # Jumbo MCP Server Release Notes
 
+## What's New in v0.2.2
+
+### 1. Multi-Line Receipt Item & Quantity Parsing
+* **Quantity & Unit Price Extraction**: The digital receipt parser (`parseReceiptDoc`) now properly parses multi-line receipt entries where quantity multipliers are printed on sublines (e.g. `S MICHAEL RIESLING` followed by `2 X 4,99  9,98`).
+* **Enhanced ReceiptItem Model**: Extended `ReceiptItem` with `quantity` and `unit_price` while preserving the exact line total `price`. This ensures accounting accuracy where line prices sum up to the exact receipt total.
+* **Product Name Recovery**: Restored missing product titles for multi-quantity items that were previously misnamed as `"2 X 4,99"`.
+
+### 2. Promo Digest Precision & Noise Filtering
+* **Unit-Accurate Frequency Mining**: Purchase frequency calculations in `jumbo_get_promo_digest` now accumulate actual item units bought (`item.quantity`) rather than line counts.
+* **Non-Product Filtering**: Filtered out container deposits (`STATIEGELD`) and discount deduction credits from frequent grocery mining, eliminating wasted search calls.
+* **False-Match Prevention**: Eliminated false positive catalog matches (such as matching Coca-Cola for stray `"2 X 2,49"` lines).
+* **Brand-Stripped Search Fallback**: `searchProductForDigest` now falls back to a stripped store-brand query (`^JUMBO['’S]*\s+`) if literal POS keyword queries yield 0 results, substantially increasing promo match rates for private-label goods.
+
+### 3. Receipt ID Resolution & Candidate Caching
+* **Adaptive ID Form Memory**: `getReceiptDetails` and `receiptIdCandidates` now remember the successful candidate ID form across calls, reducing repeat probing HTTP traffic by up to 75% on batch scans.
+* **Regex Hoisting**: Hoisted UUID parsing regular expressions and added early returns for empty or whitespace-only inputs.
+
+### 4. GraphQL Operation Hygiene
+* **Unused Variable Removal**: Dropped the unused `$orderChannel` variable declaration from the `ActiveBasket` query, resolving `GRAPHQL_VALIDATION_FAILED` errors on `jumbo_get_basket`.
+* **Static Schema Verification**: Added automated tests guarding every GraphQL operation document against declared-but-unused variables.
+
+### 5. Test Suite Expansion
+* Expanded automated test suite to 103 tests covering multi-line receipt parsing, unit price/quantity tracking, brand fallback matching, and GraphQL hygiene.
+
+---
+
 ## What's New in v0.2.1
 
 ### 1. Critical Auth0 Session Refresh & Audience Fix
