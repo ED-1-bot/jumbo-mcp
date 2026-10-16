@@ -255,9 +255,20 @@ test("dedupe: all terms already present makes no edit call", async () => {
 
 // -------------------------------------------------------------------- basket
 
-test("basket: maps lines, promotions, line totals and subtotal; sends MOBILE_WEB", async () => {
+test("basket: maps lines, promotions, line totals and subtotal; sends no unused variables", async () => {
   installFetch((body) => {
-    assert.deepEqual(body.variables, { orderChannel: "MOBILE_WEB" });
+    // Jumbo rejects declared-but-unused variables with GRAPHQL_VALIDATION_FAILED.
+    // The app's Apollo Client strips them before sending; so must we.
+    assert.equal(
+      body.variables,
+      undefined,
+      "no variables are sent for a query that declares none"
+    );
+    assert.equal(
+      /\$\w+\s*:/.test(body.query),
+      false,
+      "ActiveBasket declares no variables, so none can be unused"
+    );
     return json({
       data: {
         activeBasket: {
