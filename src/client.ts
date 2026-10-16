@@ -1351,8 +1351,13 @@ export class JumboClient {
 
   /** Read-only active basket via the GraphQL `ActiveBasket` operation. */
   async getBasket(): Promise<Basket> {
+    // NOTE: the app's own document declares `$voucherCodes, $shippingCosts,
+    // $orderChannel, $customerId` but uses none of them, and Apollo Client strips
+    // unused variables before sending. We must not declare or send them: Jumbo's
+    // router rejects the request with GRAPHQL_VALIDATION_FAILED
+    // ("Variable \"$orderChannel\" is never used.").
     const q = `
-    query ActiveBasket($orderChannel: OrderChannel!) {
+    query ActiveBasket {
       activeBasket {
         __typename
         ... on ActiveBasketResult {
@@ -1397,11 +1402,7 @@ export class JumboClient {
       }
     }
     `;
-    const data = await this.executeGraphql<any>(
-      q,
-      { orderChannel: "MOBILE_WEB" },
-      "JUMBO_WEB-basket"
-    );
+    const data = await this.executeGraphql<any>(q, undefined, "JUMBO_WEB-basket");
     const res = this.unwrapUnion<any>(
       data?.activeBasket,
       ["ActiveBasketResult"],
