@@ -23,6 +23,8 @@ export interface ReceiptItem {
   name: string;
   price: number;
   is_promotion: boolean;
+  quantity: number;
+  unit_price: number;
 }
 
 export interface ReceiptOverviewItem {

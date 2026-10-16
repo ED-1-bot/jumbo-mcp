@@ -167,8 +167,8 @@ test("getReceiptDetails: parses the embedded receipt document", async () => {
   assert.equal(d.total, 3.68);
   assert.equal(d.payment_method, "PIN");
   assert.equal(d.items.length, 2);
-  assert.deepEqual(d.items[0], { name: "Halfvolle melk", price: 2.19, is_promotion: false });
-  assert.deepEqual(d.items[1], { name: "Brood", price: 1.49, is_promotion: true });
+  assert.deepEqual(d.items[0], { name: "Halfvolle melk", price: 2.19, is_promotion: false, quantity: 1, unit_price: 2.19 });
+  assert.deepEqual(d.items[1], { name: "Brood", price: 1.49, is_promotion: true, quantity: 1, unit_price: 1.49 });
   assert.deepEqual(d.vat_overview, ["9% 0,30"]);
   assert.equal(d.points_earned, 12);
 });
@@ -438,11 +438,35 @@ test("parseReceiptDoc: extracts items, total, payment method and VAT lines", () 
   assert.equal(parsed.total, 3.68);
   assert.equal(parsed.payment_method, "PIN");
   assert.deepEqual(parsed.items, [
-    { name: "Halfvolle melk", price: 2.19, is_promotion: false },
-    { name: "Brood", price: 1.49, is_promotion: true },
+    { name: "Halfvolle melk", price: 2.19, is_promotion: false, quantity: 1, unit_price: 2.19 },
+    { name: "Brood", price: 1.49, is_promotion: true, quantity: 1, unit_price: 1.49 },
   ]);
   assert.deepEqual(parsed.vat_overview, ["9% 0,30"]);
   assert.ok(parsed.raw_lines.includes("OMSCHRIJVING"));
+});
+
+test("parseReceiptDoc: multi-line items with quantity multiplier, unit price and discount", () => {
+  const c = new JumboClient();
+  const parsed = c.parseReceiptDoc(
+    receiptDoc([
+      "OMSCHRIJVING                 BEDRAG IN EUR",
+      "==========================================",
+      "S MICHAEL RIESLING",
+      "  2 X 4,99                            9,98",
+      "ACTIE WIJNEN WIT                     -2,50",
+      "COURGETTE",
+      "  2 X 0,95                            1,90",
+      "KOMKOMMER                P            0,95",
+      "Totaal                               11,33",
+    ])
+  );
+  assert.equal(parsed.total, 11.33);
+  assert.deepEqual(parsed.items, [
+    { name: "S MICHAEL RIESLING", price: 9.98, is_promotion: false, quantity: 2, unit_price: 4.99 },
+    { name: "ACTIE WIJNEN WIT", price: -2.50, is_promotion: false, quantity: 1, unit_price: -2.50 },
+    { name: "COURGETTE", price: 1.90, is_promotion: false, quantity: 2, unit_price: 0.95 },
+    { name: "KOMKOMMER", price: 0.95, is_promotion: true, quantity: 1, unit_price: 0.95 },
+  ]);
 });
 
 test("parseReceiptDoc: malformed input returns empty results, never throws", () => {

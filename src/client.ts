@@ -236,6 +236,7 @@ export class JumboClient {
       let paymentMethod: string | null = null;
       const vatLines: string[] = [];
       let inVat = false;
+      let pendingName: string | null = null;
 
       for (const line of lines) {
         if (line.includes("OMSCHRIJVING")) {
@@ -248,15 +249,51 @@ export class JumboClient {
             const m = line.match(/Totaal\s+([\d,]+)/);
             if (m) total = parseFloat(m[1].replace(",", "."));
             inItems = false;
+            pendingName = null;
+            continue;
+          }
+
+          if (/^[=-]+$/.test(line.trim())) continue;
+
+          // Multiplier subline: e.g. "  2 X 4,99                            9,98"
+          const mult = line.match(
+            /^\s*([\d]+(?:,[\d]+)?)\s*(?:kg)?\s*[xX]\s+([\d]+,[\d]{2})(?:\s+P)?\s+(-?[\d]+,[\d]{2})$/i
+          );
+          const isPromo =
+            line.includes(" P ") || line.endsWith(" P") || line.includes("  P  ");
+
+          if (mult && pendingName) {
+            const quantity = parseFloat(mult[1].replace(",", "."));
+            const unitPrice = parseFloat(mult[2].replace(",", "."));
+            const price = parseFloat(mult[3].replace(",", "."));
+            items.push({
+              name: pendingName,
+              price,
+              is_promotion: isPromo,
+              quantity,
+              unit_price: unitPrice,
+            });
+            pendingName = null;
             continue;
           }
 
           const m = line.match(/^(.*?)(?:\s+P)?\s+(-?[\d]+,[\d]{2})$/);
           if (m) {
-            const name = m[1].trim();
+            const name = pendingName
+              ? `${pendingName} ${m[1].trim()}`.trim()
+              : m[1].trim();
             const price = parseFloat(m[2].replace(",", "."));
-            const isPromo = line.includes(" P ") || line.endsWith(" P") || line.includes("  P  ");
-            items.push({ name, price, is_promotion: isPromo });
+            items.push({
+              name,
+              price,
+              is_promotion: isPromo,
+              quantity: 1,
+              unit_price: price,
+            });
+            pendingName = null;
+          } else {
+            const trimmed = line.trim();
+            if (trimmed) pendingName = trimmed;
           }
         }
 
@@ -1107,8 +1144,26 @@ export class JumboClient {
       { input: { searchType: "KEYWORD", searchTerms: term } },
       "JUMBO_WEB-loyalty"
     );
-    const products = res?.searchProducts?.products;
-    return Array.isArray(products) && products.length > 0 ? products[0] : null;
+    let products = res?.searchProducts?.products;
+    if (Array.isArray(products) && products.length > 0) {
+      return products[0];
+    }
+
+    // Fallback: if search by literal term returned 0 hits, try stripped store brand
+    const stripped = term.replace(/^JUMBO['’S]*\s+/i, "").trim();
+    if (stripped && stripped !== term) {
+      const resFallback = await this.executeGraphql<any>(
+        q,
+        { input: { searchType: "KEYWORD", searchTerms: stripped } },
+        "JUMBO_WEB-loyalty"
+      );
+      products = resFallback?.searchProducts?.products;
+      if (Array.isArray(products) && products.length > 0) {
+        return products[0];
+      }
+    }
+
+    return null;
   }
 
   /** Personalised, account-level offers (not tied to one product). */
@@ -1280,11 +1335,21 @@ export class JumboClient {
         continue;
       }
       for (const item of d.items) {
+        // Only count actual grocery items: skip discounts, bottle deposits, and non-product line items
+        if (
+          item.price <= 0 ||
+          item.name.toUpperCase() === "STATIEGELD" ||
+          /^\d+\s*X\b/i.test(item.name)
+        ) {
+          continue;
+        }
+
         const key = normalizeTerm(item.name);
         if (!key) continue;
+        const qty = item.quantity > 0 ? item.quantity : 1;
         const existing = counts.get(key);
-        if (existing) existing.n++;
-        else counts.set(key, { display: item.name.trim(), n: 1 });
+        if (existing) existing.n += qty;
+        else counts.set(key, { display: item.name.trim(), n: qty });
       }
     }
 

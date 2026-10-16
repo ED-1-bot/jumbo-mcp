@@ -321,3 +321,129 @@ test("digest: a product-search failure marks the term not_matched instead of thr
   assert.equal(d.matched_count, 0);
   assert.deepEqual(d.not_matched.sort(), ["Bananen", "Halfvolle melk"]);
 });
+
+test("digest: multi-line items accumulate quantity and skip discount lines and container deposits", async () => {
+  installFetch((body) => {
+    switch (op(body)) {
+      case "GetReceiptOverview":
+        if (body.query.includes("page: 0")) {
+          return json({
+            data: {
+              receiptOverview: {
+                totalResults: 1,
+                pageSize: 25,
+                currentPage: 0,
+                receipts: [
+                  { transactionId: "t-mult", purchaseEndOn: recent(1), receiptSource: "DIGITAL", store: { storeId: "s1", name: "Jumbo Test" }, pointBalance: 10 },
+                ],
+              },
+            },
+          });
+        }
+        return json({ data: { receiptOverview: { totalResults: 1, pageSize: 25, currentPage: 1, receipts: [] } } });
+      case "GetDigitalReceipt":
+        return json({
+          data: {
+            receipt: {
+              receiptImage: {
+                image: receiptDoc([
+                  "OMSCHRIJVING",
+                  "Halfvolle melk",
+                  "  3 X 1,69                            5,07",
+                  "ACTIE MELK                           -1,00",
+                  "STATIEGELD                            0,15",
+                  "Totaal                                4,22",
+                ]),
+                type: "json",
+              },
+              store: { name: "Jumbo Test" },
+              purchaseEndOn: recent(1),
+              receiptSource: "DIGITAL",
+            },
+          },
+        });
+      case "PromoDigestSearch": {
+        const term = body.variables?.input?.searchTerms;
+        if (term === "Halfvolle melk") {
+          return json({ data: { searchProducts: { count: 1, products: [PRODUCT_WITH_PROMO] } } });
+        }
+        return json({ data: { searchProducts: { count: 0, products: [] } } });
+      }
+      case "PromoDigestCustomerPromotions":
+        return json({ data: { getCustomerPromotions: [] } });
+      default:
+        throw new Error("unexpected op " + op(body));
+    }
+  });
+
+  const client = new JumboClient();
+  const d = await client.getPromoDigest({ days: 90, minTimes: 2 });
+  // Distinct terms must only be 1 (Halfvolle melk), NOT statiegeld or discounts
+  assert.equal(d.scanned.distinct_terms, 1);
+  assert.equal(d.matched_count, 1);
+  assert.equal(d.matched[0].term, "Halfvolle melk");
+  assert.equal(d.matched[0].times_bought, 3); // 3 units bought from multiplier
+});
+
+test("digest: searchProductForDigest falls back to stripped store brand on 0 hits", async () => {
+  const searchedTerms: string[] = [];
+  installFetch((body) => {
+    switch (op(body)) {
+      case "GetReceiptOverview":
+        if (body.query.includes("page: 0")) {
+          return json({
+            data: {
+              receiptOverview: {
+                totalResults: 1,
+                pageSize: 25,
+                currentPage: 0,
+                receipts: [
+                  { transactionId: "t-brand", purchaseEndOn: recent(1), receiptSource: "DIGITAL", store: { storeId: "s1", name: "Jumbo Test" }, pointBalance: 10 },
+                ],
+              },
+            },
+          });
+        }
+        return json({ data: { receiptOverview: { totalResults: 1, pageSize: 25, currentPage: 1, receipts: [] } } });
+      case "GetDigitalReceipt":
+        return json({
+          data: {
+            receipt: {
+              receiptImage: {
+                image: receiptDoc([
+                  "OMSCHRIJVING",
+                  "JUMBOS MARGHERITA 5,99",
+                  "Totaal 5,99",
+                ]),
+                type: "json",
+              },
+              store: { name: "Jumbo Test" },
+              purchaseEndOn: recent(1),
+              receiptSource: "DIGITAL",
+            },
+          },
+        });
+      case "PromoDigestSearch": {
+        const term = body.variables?.input?.searchTerms;
+        searchedTerms.push(term);
+        // Literal search fails, stripped fallback succeeds
+        if (term === "JUMBOS MARGHERITA") {
+          return json({ data: { searchProducts: { count: 0, products: [] } } });
+        }
+        if (term === "MARGHERITA") {
+          return json({ data: { searchProducts: { count: 1, products: [PRODUCT_WITH_PROMO] } } });
+        }
+        return json({ data: { searchProducts: { count: 0, products: [] } } });
+      }
+      case "PromoDigestCustomerPromotions":
+        return json({ data: { getCustomerPromotions: [] } });
+      default:
+        throw new Error("unexpected op " + op(body));
+    }
+  });
+
+  const client = new JumboClient();
+  const d = await client.getPromoDigest({ days: 90, minTimes: 1 });
+  assert.equal(d.matched_count, 1);
+  assert.deepEqual(searchedTerms, ["JUMBOS MARGHERITA", "MARGHERITA"]);
+});
