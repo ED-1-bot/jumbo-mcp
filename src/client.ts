@@ -58,12 +58,39 @@ export class JumboShoppingListError extends JumboApiError {
   }
 }
 
+/**
+ * Raised when Jumbo rejects the token we sent (as opposed to never having one),
+ * i.e. the session is genuinely no longer valid for the Jumbo API. Carries the
+ * upstream text for diagnosis but always leads with an actionable instruction.
+ */
+export class JumboSessionInvalidError extends Error {
+  readonly code = "JUMBO_SESSION_INVALID";
+
+  constructor(upstreamDetail: string) {
+    const detail = upstreamDetail.trim().slice(0, 200);
+    super(
+      "Jumbo rejected the current session: the token was accepted by Auth0 but " +
+        "Jumbo's API could not resolve a customer from it. Run 'jumbo-mcp login' to " +
+        "re-authenticate (for headless deployments, set JUMBO_REFRESH_TOKEN from that " +
+        "login)." +
+        (detail ? ` [upstream: ${detail}]` : "")
+    );
+    this.name = "JumboSessionInvalidError";
+  }
+}
+
 export class JumboClient {
   private userAgent =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
-  private async getAuthHeaders(): Promise<Record<string, string>> {
-    const token = await getValidAccessToken();
+  private async getAuthHeaders(accessTokenOverride?: string): Promise<Record<string, string>> {
+    // An explicit override (a token we just refreshed) must win over the stored
+    // session and over JUMBO_TOKEN; otherwise refresh+retry re-sends the very
+    // token that just failed, and the retry can never succeed.
+    const token =
+      accessTokenOverride !== undefined
+        ? accessTokenOverride
+        : await getValidAccessToken();
     if (token) {
       return { Authorization: `Bearer ${token}` };
     }
@@ -96,9 +123,10 @@ export class JumboClient {
     query: string,
     variables?: Record<string, any>,
     clientName: string = "JUMBO_WEB-loyalty",
-    retryOn401: boolean = true
+    retryOn401: boolean = true,
+    accessTokenOverride?: string
   ): Promise<T> {
-    const authHeaders = await this.getAuthHeaders();
+    const authHeaders = await this.getAuthHeaders(accessTokenOverride);
     const payload: { query: string; variables?: Record<string, any> } = { query };
     if (variables) payload.variables = variables;
 
@@ -124,13 +152,17 @@ export class JumboClient {
     }
 
     if (resp.status === 401 && retryOn401) {
-      try {
-        await refreshTokens();
-        return this.executeGraphql<T>(query, variables, clientName, false);
-      } catch {
-        // Fall through
-      }
-      throw new Error("HTTP 401 Unauthorized: Session or token expired.");
+      // `await` the retry: without it the recursive failure resolves the
+      // returned promise asynchronously, escapes this try/catch, and surfaces to
+      // the caller as a raw transport error instead of an actionable one.
+      const fresh = await refreshTokens();
+      return await this.executeGraphql<T>(
+        query,
+        variables,
+        clientName,
+        false,
+        fresh.access_token
+      );
     }
 
     if (!resp.ok) {
@@ -141,20 +173,28 @@ export class JumboClient {
     const res = (await resp.json()) as any;
     if (res.errors && res.errors.length > 0) {
       const errMsgs = res.errors.map((e: any) => e.message || "Unknown error").join("; ");
-      if (
-        (errMsgs.includes("401 UNAUTHORIZED") || errMsgs.includes("Customer ID")) &&
-        retryOn401
-      ) {
-        try {
-          await refreshTokens();
-          return this.executeGraphql<T>(query, variables, clientName, false);
-        } catch {
-          // Ignore
-        }
-        throw new Error(
-          "Jumbo session expired. Please re-authenticate by running 'jumbo-mcp login'."
+      const isAuthFailure =
+        errMsgs.includes("401 UNAUTHORIZED") ||
+        errMsgs.includes("Customer ID") ||
+        /unauthorized/i.test(errMsgs);
+
+      if (isAuthFailure && retryOn401) {
+        // Renew once, then replay with the NEW token explicitly. If this still
+        // fails the session is genuinely dead -- say so, don't leak raw text.
+        const fresh = await refreshTokens();
+        return await this.executeGraphql<T>(
+          query,
+          variables,
+          clientName,
+          false,
+          fresh.access_token
         );
       }
+
+      if (isAuthFailure) {
+        throw new JumboSessionInvalidError(errMsgs);
+      }
+
       throw new Error(`GraphQL Error: ${errMsgs}`);
     }
 
