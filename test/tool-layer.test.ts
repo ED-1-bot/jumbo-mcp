@@ -13,8 +13,8 @@ process.env.JUMBO_TOKENS_FILE = "/nonexistent/jumbo-mcp/tokens.json";
 delete process.env.JUMBO_REFRESH_TOKEN;
 
 const { createServer } = await import("../src/index.js");
-const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+const { Client } = await import("@modelcontextprotocol/client");
+const { InMemoryTransport } = await import("@modelcontextprotocol/server");
 
 type Call = { op: string | undefined; body: any };
 let calls: Call[] = [];
