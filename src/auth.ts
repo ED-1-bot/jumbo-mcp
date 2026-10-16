@@ -15,6 +15,70 @@ export const AUTH_CONFIG = {
 
 export const REDIRECT_URI = "jumbo://callbacks/login";
 
+/**
+ * Default OAuth scope. Mirrors the Jumbo web/app login (auth0-spa-js), which
+ * sends `scope` on BOTH the authorization_code and refresh_token grants.
+ */
+export const DEFAULT_SCOPE = "openid profile email offline_access";
+
+/**
+ * Namespaced claim Jumbo's GraphQL router uses to resolve the signed-in
+ * customer. Without it the API answers "Customer ID cannot be null or empty" /
+ * "401 UNAUTHORIZED Customer ID header is required".
+ */
+export const CUSTOMER_ID_CLAIM = "https://jumbo.com/customerId";
+
+/**
+ * Raised when the stored Jumbo session cannot be used or renewed. `code` lets
+ * callers distinguish "we never had a usable session" from "Jumbo rejected the
+ * token we sent", instead of leaking raw upstream GraphQL text.
+ */
+export class JumboAuthError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "JumboAuthError";
+    this.code = code;
+  }
+}
+
+/**
+ * Guard a freshly minted access token. A refresh that succeeds at Auth0 can
+ * still return a token Jumbo will not accept (typically because the grant was
+ * issued for the wrong `audience`), so fail loudly here rather than sending a
+ * dead token upstream and reporting a raw GraphQL error later.
+ */
+export function assertUsableAccessToken(accessToken: string): void {
+  // Opaque (non-JWT) tokens cannot be inspected; only validate JWTs.
+  if (!accessToken || accessToken.split(".").length < 3) return;
+
+  const claims = decodeJwtPayload(accessToken);
+  if (!claims || Object.keys(claims).length === 0) return;
+
+  const aud = claims.aud;
+  const audList = Array.isArray(aud) ? aud : aud ? [aud] : [];
+  if (audList.length > 0 && !audList.includes(AUTH_CONFIG.audience)) {
+    throw new JumboAuthError(
+      "INVALID_REFRESHED_TOKEN",
+      `Refreshed Jumbo token has audience ${JSON.stringify(audList)} but this client ` +
+        `requires '${AUTH_CONFIG.audience}'. Jumbo's customer identity is only attached ` +
+        `to that audience. Re-run 'jumbo-mcp login', and set JUMBO_REFRESH_TOKEN from ` +
+        `that login for headless deployments.`
+    );
+  }
+
+  if (!claims[CUSTOMER_ID_CLAIM]) {
+    throw new JumboAuthError(
+      "INVALID_REFRESHED_TOKEN",
+      `Refreshed Jumbo token has no '${CUSTOMER_ID_CLAIM}' claim, so Jumbo cannot ` +
+        `resolve a customer (upstream then reports "Customer ID cannot be null or ` +
+        `empty"). Re-run 'jumbo-mcp login' and set JUMBO_REFRESH_TOKEN from that ` +
+        `login for headless deployments.`
+    );
+  }
+}
+
 export function getTokensFilePath(): string {
   const envPath = process.env.JUMBO_TOKENS_FILE;
   if (envPath) return path.resolve(envPath.replace(/^~/, os.homedir()));
@@ -177,12 +241,16 @@ export async function exchangeCode(
   }
 
   const tokenUrl = `https://${domain}/oauth/token`;
+  // Send `audience` + `scope` on the exchange too: auth0-spa-js does, and it
+  // keeps the initial token's claims identical to the refreshed one.
   const payload = {
     grant_type: "authorization_code",
     client_id: clientId,
     code,
     redirect_uri: redirectUri,
     code_verifier: codeVerifier,
+    audience: AUTH_CONFIG.audience,
+    scope: DEFAULT_SCOPE,
   };
 
   const resp = await fetch(tokenUrl, {
@@ -222,17 +290,30 @@ export async function refreshTokens(existing?: TokensData): Promise<TokensData> 
   const rToken = tokens?.refresh_token || process.env.JUMBO_REFRESH_TOKEN;
 
   if (!rToken) {
-    throw new Error("No refresh_token found. Please log in using 'jumbo-mcp login'.");
+    throw new JumboAuthError(
+      "MISSING_REFRESH_TOKEN",
+      "No Jumbo refresh_token is available, so the session cannot be renewed. Run " +
+        "'jumbo-mcp login' to re-authenticate, and set JUMBO_REFRESH_TOKEN from that " +
+        "login for headless deployments."
+    );
   }
 
   const domain = tokens?.domain || AUTH_CONFIG.domain;
   const clientId = tokens?.client_id || AUTH_CONFIG.client_id;
   const tokenUrl = `https://${domain}/oauth/token`;
 
+  // `audience` and `scope` are REQUIRED here. Auth0 mints the refreshed access
+  // token for the client's default audience when `audience` is omitted, and the
+  // 'https://jumbo.com/customerId' claim is only attached to the Jumbo web API
+  // audience -- so an audience-less refresh returns a token Jumbo rejects with
+  // "Customer ID cannot be null or empty". (auth0-spa-js spreads the stored
+  // authorization params, including audience + scope, into this grant.)
   const payload = {
     grant_type: "refresh_token",
     client_id: clientId,
     refresh_token: rToken,
+    audience: AUTH_CONFIG.audience,
+    scope: DEFAULT_SCOPE,
   };
 
   const resp = await fetch(tokenUrl, {
@@ -250,6 +331,11 @@ export async function refreshTokens(existing?: TokensData): Promise<TokensData> 
   }
 
   const fresh = (await resp.json()) as Partial<TokensData>;
+
+  // Validate before persisting: never overwrite a good session with a token
+  // Jumbo will reject.
+  assertUsableAccessToken(fresh.access_token || "");
+
   const merged: TokensData = {
     ...(tokens || {}),
     ...fresh,
@@ -263,9 +349,16 @@ export async function refreshTokens(existing?: TokensData): Promise<TokensData> 
   return merged;
 }
 
-export async function getValidAccessToken(): Promise<string | null> {
-  const tokenOverride = process.env.JUMBO_TOKEN;
-  if (tokenOverride) return tokenOverride.trim();
+export async function getValidAccessToken(
+  opts: { ignoreEnvOverride?: boolean } = {}
+): Promise<string | null> {
+  // JUMBO_TOKEN is an explicit operator override. The retry path passes
+  // `ignoreEnvOverride` so a mid-flight refresh is not undone by re-reading a
+  // now-stale JUMBO_TOKEN.
+  if (!opts.ignoreEnvOverride) {
+    const tokenOverride = process.env.JUMBO_TOKEN;
+    if (tokenOverride) return tokenOverride.trim();
+  }
 
   const tokens = loadTokens();
   let accessToken = tokens?.access_token;
@@ -289,13 +382,22 @@ export async function getValidAccessToken(): Promise<string | null> {
     }
   }
 
+  if (shouldRefresh && !refreshToken) {
+    // Previously this path returned the stale token silently, which surfaced
+    // later as an opaque upstream "Customer ID" error. Fail loudly instead.
+    throw new JumboAuthError(
+      "MISSING_REFRESH_TOKEN",
+      `The stored Jumbo access token is expired and no refresh_token is available ` +
+        `(checked ${getTokensFilePath()} and JUMBO_REFRESH_TOKEN). Run ` +
+        `'jumbo-mcp login' to re-authenticate.`
+    );
+  }
+
   if (shouldRefresh && refreshToken) {
-    try {
-      const fresh = await refreshTokens(tokens || undefined);
-      accessToken = fresh.access_token;
-    } catch (err: any) {
-      process.stderr.write(`Warning: Failed to auto-refresh token: ${err.message}\n`);
-    }
+    // No catch: a refresh failure must surface as an actionable auth error
+    // rather than degrading into "use the dead token and hope".
+    const fresh = await refreshTokens(tokens || undefined);
+    accessToken = fresh.access_token;
   }
 
   return accessToken || null;
@@ -360,7 +462,7 @@ export async function loginCli(): Promise<void> {
     console.log(`📁 Tokens saved to: ${getTokensFilePath()}`);
 
     const claims = decodeJwtPayload(tokens.access_token);
-    const custId = claims["https://jumbo.com/customerId"];
+    const custId = claims[CUSTOMER_ID_CLAIM];
     const email = claims["https://jumbo.com/username"];
     if (custId) console.log(`👤 Customer ID: ${custId}`);
     if (email) console.log(`📧 Account:     ${email}`);
