@@ -1,5 +1,24 @@
 # Jumbo MCP Server Release Notes
 
+## What's New in v0.3.0
+
+### 1. Migration to MCP TypeScript SDK v2
+* **Modern MCP Server Architecture**: Migrated to MCP TypeScript SDK v2 (`@modelcontextprotocol/server` 2.3.1) using `McpServer`.
+* **Direct Zod Tool Schemas**: Converted tool registrations to type-safe Zod schema definitions with `server.registerTool(...)`, eliminating manual JSON schema boilerplate and ensuring end-to-end input and output validation.
+* **Streamlined Core Dependencies**: Dropped direct `@modelcontextprotocol/core` dependency and updated documentation to require Node.js `>= 20` matching the v2 SDK runtime baseline.
+
+### 2. Automated Stealth Browser Login & Cloudflare Turnstile Handling
+* **Stealth Browser Automation**: Integrated Playwright with `puppeteer-extra-plugin-stealth` (`playwright-extra`) to automate the web login flow and solve Cloudflare Turnstile bot challenges.
+* **Clean Refresh Token Extraction**: `npm run login` cleanly extracts the permanent Auth0 refresh token (`JUMBO_REFRESH_TOKEN=...`) directly to stdout for seamless copy-pasting into `.env` or container configurations.
+* **Optional Token Storage**: Maintained `--save` flag support to persist tokens to disk (`~/.config/jumbo-mcp/tokens.json`) when file-based storage is preferred over environment variables.
+
+### 3. Test Suite Expansion & Modern SDK Test Layer
+* **106 Automated Tests**: Expanded test suite to 106 automated tests covering all client endpoints, authentication mechanisms, and MCP tool handlers.
+* **In-Memory MCP Client Integration Tests**: Updated `test/tool-layer.test.ts` to spin up in-memory client/server pairs using `@modelcontextprotocol/client` 2.3.1 and `InMemoryTransport`, verifying all 18 MCP tools, Zod schema validation, and error propagation.
+* **Browser Flow Unit Tests**: Added unit tests with mock Playwright interfaces (`test/auth-browser.test.ts`) covering automated browser flows, token parsing, and error handling.
+
+---
+
 ## What's New in v0.2.2
 
 ### 1. Multi-Line Receipt Item & Quantity Parsing
