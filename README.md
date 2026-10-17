@@ -12,7 +12,7 @@ Connect your AI assistant (Claude Desktop, Cursor, Antigravity, OpenClaw, …) t
 
 ## Installation & Setup
 
-Requires Node.js `>= 18`.
+Requires Node.js `>= 20`.
 
 ### 1. Clone & Build
 ```bash
