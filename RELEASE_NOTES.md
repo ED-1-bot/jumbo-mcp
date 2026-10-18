@@ -1,5 +1,25 @@
 # Jumbo MCP Server Release Notes
 
+## What's New in v0.3.1
+
+### 1. Accurate Statiegeld (Deposit) Accounting on Receipts
+* **Returned Bottle Deposit Extraction**: The digital receipt parser now captures returned deposit vouchers (`Ret emballage gekoppeld`, `Ret emballage`, `Statiegeld retour`, `Emballage`) from the `Betaald:` payment block.
+* **Actual Amount Paid**: Added `amount_paid` (amount charged to card or cash) alongside the gross grocery `total`. When returned bottle deposits are redeemed, `amount_paid` accurately reflects `total - returned_deposit`.
+* **Charged Statiegeld Tracking**: Added `charged_deposit` to `ReceiptDetails` to track the sum of bottle/can deposit fees charged on purchased items.
+
+### 2. New Tool: `jumbo_get_statiegeld_summary`
+* **Period-Based Statiegeld Aggregation**: Added a dedicated read-only MCP tool (`jumbo_get_statiegeld_summary`) that calculates total returned deposits, total charged deposits, net returned balance, and trip counts across receipts in a date range or calendar year (e.g. `year: 2026`).
+
+### 3. Structured VAT Breakdown & Discount Tracking
+* **Structured `vat_breakdown` Objects**: Converted raw VAT lines into typed `VatBreakdownItem` objects containing `rate_percent`, `amount_excl`, `vat_amount`, and `amount_incl`, cleanly isolating 0% VAT statiegeld from 9% and 21% lines while preserving `vat_overview` string compatibility.
+* **`total_discount` & `subtotal` Fields**: Added explicit `total_discount` (parsed from `Totaal korting:`) and `subtotal` (gross total before discounts) to `ReceiptDetails`.
+
+### 4. Store ID & Loyalty Points Resolution
+* **Resolved `store_id` Bug**: Added `storeId` to the GraphQL `GetDigitalReceipt` selection with a fallback extractor from receipt POS metadata, populating `store_id` across all receipt calls.
+* **Loyalty Points Balance**: Mapped `points_balance` (`newBalance`) and `points_redeemed` from the Extra's loyalty program data.
+
+---
+
 ## What's New in v0.3.0
 
 ### 1. Migration to MCP TypeScript SDK v2

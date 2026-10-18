@@ -1,7 +1,7 @@
 # Jumbo MCP Server
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-0.3.0-green.svg)](https://modelcontextprotocol.io/)
+[![MCP](https://img.shields.io/badge/MCP-0.3.1-green.svg)](https://modelcontextprotocol.io/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 
 A Model Context Protocol (MCP) server for **Jumbo Supermarkten**.
@@ -142,6 +142,7 @@ Run with `JUMBO_REFRESH_TOKEN`:
 | `jumbo_get_promo_digest` | What's on offer among the things you actually buy (read-only). | `days` (`90`), `min_times` (`2`), `limit` (`25`), `category` |
 | `jumbo_get_basket` | Current basket: lines, quantities, unit prices, promotions, subtotal. | None |
 | `jumbo_get_deposits` | Statiegeld for one order: catalogue plus deposits returned. | `order_id` (required) |
+| `jumbo_get_statiegeld_summary` | Statiegeld totals: returned, charged, and net balance across receipts in a date range or year. | `year`, `start_date`, `end_date`, `max_receipts` (`50`) |
 | `jumbo_get_stamps` | Digital stamps, active saving (spaar) campaigns, buying-stamps balance. | None |
 
 ---

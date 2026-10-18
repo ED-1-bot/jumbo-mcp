@@ -103,7 +103,7 @@ async function showStatus(): Promise<void> {
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "jumbo-mcp",
-    version: "0.3.0",
+    version: "0.3.1",
   });
 
   // Tool: Login (Agent auth verification)
@@ -189,7 +189,7 @@ export function createServer(): McpServer {
             });
 
   // Tool: Get Receipt Details
-  server.registerTool("jumbo_get_receipt_details", { title: "Get Jumbo Receipt Details", description: "Get detailed line items, unit prices, discounts, total, payment method, and Extra's points for a specific Jumbo receipt.", annotations: { readOnlyHint: true }, inputSchema: z.object({
+  server.registerTool("jumbo_get_receipt_details", { title: "Get Jumbo Receipt Details", description: "Get detailed line items, unit prices, discounts, total, amount paid, returned deposit (statiegeld), payment method, and Extra's points for a specific Jumbo receipt.", annotations: { readOnlyHint: true }, inputSchema: z.object({
               transaction_id: z
                 .string()
                 .describe("The transactionId of the receipt (from jumbo_list_receipts)"),
@@ -506,6 +506,40 @@ export function createServer(): McpServer {
                 return toolError(error);
               }
             });
+
+  // Tool: Get Statiegeld Summary (read-only)
+  server.registerTool("jumbo_get_statiegeld_summary", {
+    title: "Get Jumbo Statiegeld Summary",
+    description:
+      "Calculate total returned and charged statiegeld (bottle/can deposits) across store receipts in a date range or calendar year (e.g. 2026). " +
+      "Reports total returned, total charged, net deposit balance, and detailed per-receipt breakdown.",
+    annotations: { readOnlyHint: true },
+    inputSchema: z.object({
+      year: z.number().int().optional().describe("Filter by calendar year (e.g. 2026)"),
+      start_date: z.string().optional().describe("Start date in YYYY-MM-DD format (inclusive)"),
+      end_date: z.string().optional().describe("End date in YYYY-MM-DD format (inclusive)"),
+      max_receipts: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(50)
+        .optional()
+        .describe("Maximum number of receipts to scan (default 50)"),
+    }),
+  }, async ({ year, start_date, end_date, max_receipts }) => {
+    try {
+      const summary = await client.getStatiegeldSummary({
+        year,
+        startDate: start_date,
+        endDate: end_date,
+        maxReceipts: max_receipts,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
+    } catch (error: any) {
+      return toolError(error);
+    }
+  });
 
   // Tool: Get Stamps (read-only)
   server.registerTool("jumbo_get_stamps", { title: "Get Jumbo Stamps", description: "Read the user's digital stamps: per-campaign stamp counts, active saving (spaar) campaigns, and the buying-stamps balance.", annotations: { readOnlyHint: true }, inputSchema: z.object({}) }, async () => {

@@ -74,16 +74,17 @@ const EXPECTED_TOOLS = [
   "jumbo_set_shopping_list_item_completed",
   "jumbo_get_basket",
   "jumbo_get_deposits",
+  "jumbo_get_statiegeld_summary",
   "jumbo_get_stamps",
   "jumbo_get_promo_digest",
 ];
 
 // --------------------------------------------------------------------- tools/list
 
-test("tools/list exposes all 18 tools with the expected names", async () => {
+test("tools/list exposes all 19 tools with the expected names", async () => {
   await withServer(async (c) => {
     const { tools } = await c.listTools();
-    assert.equal(tools.length, 18);
+    assert.equal(tools.length, 19);
     assert.deepEqual(tools.map((t: any) => t.name).sort(), [...EXPECTED_TOOLS].sort());
   });
 });

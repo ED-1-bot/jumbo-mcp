@@ -23,6 +23,9 @@ import {
   PromoDigestEntry,
   DigestPromotion,
   DigestAccountOffer,
+  VatBreakdownItem,
+  StatiegeldReceiptEntry,
+  StatiegeldSummaryResult,
 } from "./types.js";
 
 const GRAPHQL_URL = "https://www.jumbo.com/api/graphql";
@@ -212,8 +215,14 @@ export class JumboClient {
   parseReceiptDoc(rawImageStr: string): {
     items: ReceiptItem[];
     total: number | null;
+    amount_paid: number | null;
+    returned_deposit: number | null;
+    charged_deposit: number | null;
+    total_discount: number | null;
+    subtotal: number | null;
     payment_method: string | null;
     vat_overview: string[];
+    vat_breakdown: VatBreakdownItem[];
     raw_lines: string[];
   } {
     try {
@@ -233,9 +242,12 @@ export class JumboClient {
       const items: ReceiptItem[] = [];
       let inItems = false;
       let total: number | null = null;
+      let amountPaid: number | null = null;
+      let returnedDeposit: number | null = null;
       let paymentMethod: string | null = null;
       const vatLines: string[] = [];
       let inVat = false;
+      let inPayments = false;
       let pendingName: string | null = null;
 
       for (const line of lines) {
@@ -295,11 +307,60 @@ export class JumboClient {
             const trimmed = line.trim();
             if (trimmed) pendingName = trimmed;
           }
+          continue;
         }
 
-        if (line.startsWith("Betaald:") || line.startsWith("VISA") || line.startsWith("PIN")) {
-          if (!paymentMethod && !line.startsWith("Betaald:")) {
-            paymentMethod = line.trim();
+        if (line.startsWith("Betaald:")) {
+          inPayments = true;
+          continue;
+        }
+
+        if (
+          line.includes("BTW overzicht") ||
+          line.includes("Customer's receipt") ||
+          line.startsWith("Terminal:")
+        ) {
+          inPayments = false;
+        }
+
+        if (inPayments || line.startsWith("VISA") || line.startsWith("PIN")) {
+          const emballageMatch = line.match(
+            /(?:ret(?:our)?\s+emballage(?:\s+gekoppeld)?|emballage|statiegeld\s+retour|statiegeldbon)\s+([\d]+,[\d]{2})/i
+          );
+          if (emballageMatch) {
+            const val = parseFloat(emballageMatch[1].replace(",", "."));
+            returnedDeposit = Math.round(((returnedDeposit ?? 0) + val) * 100) / 100;
+            continue;
+          }
+
+          const payMatch = line.match(
+            /^(VISA(?:\s+DEBIT)?|PIN|MASTERCARD|MAESTRO|CONTANT|V-PAY|AMEX)(?:\s+([\d]+,[\d]{2}))?/i
+          );
+          if (payMatch) {
+            if (!paymentMethod) {
+              paymentMethod = payMatch[1].trim();
+            }
+            if (payMatch[2]) {
+              const val = parseFloat(payMatch[2].replace(",", "."));
+              amountPaid = Math.round(((amountPaid ?? 0) + val) * 100) / 100;
+            }
+            continue;
+          }
+
+          if (
+            !paymentMethod &&
+            !/^[=-]+$/.test(line.trim()) &&
+            !line.startsWith("Totaal korting") &&
+            !line.startsWith("Customer")
+          ) {
+            const m = line.match(/^([A-Za-z0-9\-]+)(?:\s+([\d]+,[\d]{2}))?$/);
+            if (m) {
+              paymentMethod = m[1].trim();
+              if (m[2]) {
+                const val = parseFloat(m[2].replace(",", "."));
+                amountPaid = Math.round(((amountPaid ?? 0) + val) * 100) / 100;
+              }
+            }
           }
         }
 
@@ -314,19 +375,85 @@ export class JumboClient {
         }
       }
 
+      let chargedDeposit: number | null = null;
+      for (const it of items) {
+        if (it.name.toUpperCase().includes("STATIEGELD")) {
+          chargedDeposit = Math.round(((chargedDeposit ?? 0) + it.price) * 100) / 100;
+        }
+      }
+
+      if (amountPaid === null && total !== null) {
+        amountPaid = Math.round((total - (returnedDeposit ?? 0)) * 100) / 100;
+      }
+
+      let totalDiscount: number | null = null;
+      for (const line of lines) {
+        const discountMatch = line.match(/Totaal korting:\s*-?([\d]+,[\d]{2})/i);
+        if (discountMatch) {
+          totalDiscount = parseFloat(discountMatch[1].replace(",", "."));
+          break;
+        }
+      }
+      if (totalDiscount === null) {
+        const sumDiscounts = items
+          .filter((it) => it.price < 0)
+          .reduce((s, it) => s + Math.abs(it.price), 0);
+        if (sumDiscounts > 0) {
+          totalDiscount = Math.round(sumDiscounts * 100) / 100;
+        }
+      }
+
+      let subtotal: number | null = null;
+      if (total !== null) {
+        subtotal =
+          totalDiscount !== null
+            ? Math.round((total + totalDiscount) * 100) / 100
+            : total;
+      }
+
+      const vatBreakdown: VatBreakdownItem[] = [];
+      for (const vl of vatLines) {
+        const vm = vl.match(
+          /^\s*([\d]+(?:,[\d]+)?)\s*%\s+([\d]+,[\d]{2})\s+([\d]+,[\d]{2})$/
+        );
+        if (vm) {
+          const rate = parseFloat(vm[1].replace(",", "."));
+          const excl = parseFloat(vm[2].replace(",", "."));
+          const vat = parseFloat(vm[3].replace(",", "."));
+          vatBreakdown.push({
+            rate_percent: rate,
+            amount_excl: excl,
+            vat_amount: vat,
+            amount_incl: Math.round((excl + vat) * 100) / 100,
+          });
+        }
+      }
+
       return {
         items,
         total,
+        amount_paid: amountPaid,
+        returned_deposit: returnedDeposit,
+        charged_deposit: chargedDeposit,
+        total_discount: totalDiscount,
+        subtotal,
         payment_method: paymentMethod,
         vat_overview: vatLines,
+        vat_breakdown: vatBreakdown,
         raw_lines: lines,
       };
     } catch {
       return {
         items: [],
         total: null,
+        amount_paid: null,
+        returned_deposit: null,
+        charged_deposit: null,
+        total_discount: null,
+        subtotal: null,
         payment_method: null,
         vat_overview: [],
+        vat_breakdown: [],
         raw_lines: [],
       };
     }
@@ -480,6 +607,7 @@ export class JumboClient {
           }
         }
         store {
+          storeId
           name
           location {
             address {
@@ -532,17 +660,39 @@ export class JumboClient {
 
     const rawImage = receipt.receiptImage?.image || "{}";
     const parsed = this.parseReceiptDoc(rawImage);
+
+    let storeId = receipt.store?.storeId || "";
+    if (!storeId) {
+      for (const line of parsed.raw_lines) {
+        const sm = line.match(/\bSTORE\s+(\d+)\b/i);
+        if (sm) {
+          storeId = sm[1];
+          break;
+        }
+      }
+    }
+
+    const rp = receipt.receiptImage?.receiptPoints;
+
     return {
       transaction_id: transactionId,
       datetime: receipt.purchaseEndOn || "",
       store: receipt.store?.name || "",
-      store_id: "",
-      points_earned: receipt.receiptImage?.receiptPoints?.earned ?? null,
+      store_id: storeId,
+      points_earned: rp?.earned ?? 0,
+      points_redeemed: rp?.redeemed ?? null,
+      points_balance: rp?.newBalance ?? null,
       total: parsed.total,
+      amount_paid: parsed.amount_paid,
+      returned_deposit: parsed.returned_deposit,
+      charged_deposit: parsed.charged_deposit,
+      total_discount: parsed.total_discount,
+      subtotal: parsed.subtotal,
       payment_method: parsed.payment_method,
       items_count: parsed.items.length,
       items: parsed.items,
       vat_overview: parsed.vat_overview,
+      vat_breakdown: parsed.vat_breakdown,
       raw_lines: parsed.raw_lines,
     };
   }
@@ -1670,6 +1820,107 @@ export class JumboClient {
     };
   }
 
+  /**
+   * Statiegeld summary across store receipts: calculates returned deposits (emballage)
+   * and charged deposits across receipts in a date range or calendar year.
+   */
+  async getStatiegeldSummary(options?: {
+    startDate?: string;
+    endDate?: string;
+    year?: number;
+    maxReceipts?: number;
+  }): Promise<StatiegeldSummaryResult> {
+    const maxReceipts = options?.maxReceipts ?? 50;
+    const pageSize = 25;
+    let page = 0;
+    const matchingReceipts: ReceiptOverviewItem[] = [];
+
+    while (matchingReceipts.length < maxReceipts) {
+      const overview = await this.listReceipts(page, pageSize);
+      if (!overview.receipts || overview.receipts.length === 0) break;
+
+      let reachedOlderThanRange = false;
+      for (const r of overview.receipts) {
+        const dateStr = r.datetime.slice(0, 10);
+        if (options?.year && !r.datetime.startsWith(String(options.year))) {
+          if (r.datetime < String(options.year)) {
+            reachedOlderThanRange = true;
+            break;
+          }
+          continue;
+        }
+        if (options?.startDate && dateStr < options.startDate) {
+          reachedOlderThanRange = true;
+          break;
+        }
+        if (options?.endDate && dateStr > options.endDate) {
+          continue;
+        }
+        matchingReceipts.push(r);
+        if (matchingReceipts.length >= maxReceipts) break;
+      }
+
+      if (reachedOlderThanRange) break;
+      if (overview.receipts.length < pageSize) break;
+      page++;
+    }
+
+    let totalReturned = 0;
+    let totalCharged = 0;
+    let tripsReturned = 0;
+    let tripsCharged = 0;
+    const entries: StatiegeldReceiptEntry[] = [];
+
+    for (const r of matchingReceipts) {
+      if (!r.transaction_id) continue;
+      let details: ReceiptDetails;
+      try {
+        details = await this.getReceiptDetails(r.transaction_id);
+      } catch {
+        continue;
+      }
+
+      const ret = details.returned_deposit ?? 0;
+      const chg = details.charged_deposit ?? 0;
+      if (ret > 0) tripsReturned++;
+      if (chg > 0) tripsCharged++;
+      totalReturned += ret;
+      totalCharged += chg;
+
+      if (ret > 0 || chg > 0) {
+        entries.push({
+          datetime: details.datetime,
+          transaction_id: details.transaction_id,
+          store: details.store,
+          returned_deposit: details.returned_deposit,
+          charged_deposit: details.charged_deposit,
+          net_deposit: Math.round((ret - chg) * 100) / 100,
+          amount_paid: details.amount_paid,
+          total: details.total,
+        });
+      }
+    }
+
+    totalReturned = Math.round(totalReturned * 100) / 100;
+    totalCharged = Math.round(totalCharged * 100) / 100;
+    const netReturned = Math.round((totalReturned - totalCharged) * 100) / 100;
+
+    return {
+      period: {
+        start_date: options?.startDate || null,
+        end_date: options?.endDate || null,
+        year: options?.year || null,
+      },
+      receipts_scanned: matchingReceipts.length,
+      trips_with_returned_deposit: tripsReturned,
+      trips_with_charged_deposit: tripsCharged,
+      total_returned: totalReturned,
+      total_charged: totalCharged,
+      net_returned: netReturned,
+      receipts: entries,
+    };
+  }
+
   /** Digital stamps: per-campaign stamp counts, active saving campaigns, buying-stamp balance. */
   async getStamps(): Promise<StampsResult> {
     const q = `
@@ -1790,7 +2041,7 @@ async function resolveCoordinates(
     try {
       const res = await fetch(
         `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ", Netherlands")}&format=json&limit=1`,
-        { headers: { "User-Agent": "jumbo-mcp/0.3.0" } }
+        { headers: { "User-Agent": "jumbo-mcp/0.3.1" } }
       );
       if (res.ok) {
         const data: any = await res.json();

@@ -35,13 +35,55 @@ export interface ReceiptOverviewItem {
   points_earned: number;
 }
 
+export interface VatBreakdownItem {
+  rate_percent: number;
+  amount_excl: number;
+  vat_amount: number;
+  amount_incl: number;
+}
+
 export interface ReceiptDetails extends ReceiptOverviewItem {
   total: number | null;
+  amount_paid: number | null;
+  returned_deposit: number | null;
+  charged_deposit: number | null;
+  total_discount: number | null;
+  subtotal: number | null;
   payment_method: string | null;
   items_count: number;
   items: ReceiptItem[];
   vat_overview: string[];
+  vat_breakdown: VatBreakdownItem[];
+  points_earned: number;
+  points_redeemed?: number | null;
+  points_balance?: number | null;
   raw_lines: string[];
+}
+
+export interface StatiegeldReceiptEntry {
+  datetime: string;
+  transaction_id: string;
+  store: string;
+  returned_deposit: number | null;
+  charged_deposit: number | null;
+  net_deposit: number;
+  amount_paid: number | null;
+  total: number | null;
+}
+
+export interface StatiegeldSummaryResult {
+  period: {
+    start_date: string | null;
+    end_date: string | null;
+    year: number | null;
+  };
+  receipts_scanned: number;
+  trips_with_returned_deposit: number;
+  trips_with_charged_deposit: number;
+  total_returned: number;
+  total_charged: number;
+  net_returned: number;
+  receipts: StatiegeldReceiptEntry[];
 }
 
 export interface LoyaltyProfile {

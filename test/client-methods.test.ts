@@ -469,12 +469,180 @@ test("parseReceiptDoc: multi-line items with quantity multiplier, unit price and
   ]);
 });
 
+test("parseReceiptDoc: returned bottle deposit (Ret emballage gekoppeld) and card payment amount", () => {
+  const c = new JumboClient();
+  const parsed = c.parseReceiptDoc(
+    receiptDoc([
+      "OMSCHRIJVING                 BEDRAG IN EUR",
+      "==========================================",
+      "JUMBOS PS ARRABIATA                   2,99",
+      "HALFVOLLE MELK 1.0 L                  1,29",
+      "EXTRA JAM AARDBEI                     0,55",
+      "CITROENEN                             0,71",
+      "UIEN                                  0,49",
+      "KANEELBROODJE                         0,59",
+      "RUSTIEK ROZIJN WIT                    0,79",
+      "Totaal                                7,41",
+      "Betaald:                    ",
+      "Ret emballage gekoppeld               2,55",
+      "VISA                                  4,86",
+    ])
+  );
+  assert.equal(parsed.total, 7.41);
+  assert.equal(parsed.amount_paid, 4.86);
+  assert.equal(parsed.returned_deposit, 2.55);
+  assert.equal(parsed.charged_deposit, null);
+  assert.equal(parsed.payment_method, "VISA");
+  assert.equal(parsed.items.length, 7);
+});
+
+test("parseReceiptDoc: charged bottle deposit (STATIEGELD) and auto amount_paid without emballage", () => {
+  const c = new JumboClient();
+  const parsed = c.parseReceiptDoc(
+    receiptDoc([
+      "OMSCHRIJVING                 BEDRAG IN EUR",
+      "==========================================",
+      "SHOT GEMBER AARDBEI                   1,09",
+      "STATIEGELD                            0,15",
+      "SHOT ORANGE SHINE                     1,00",
+      "STATIEGELD                            0,15",
+      "Totaal                                2,39",
+      "Betaald:                    ",
+      "VISA                                  2,39",
+    ])
+  );
+  assert.equal(parsed.total, 2.39);
+  assert.equal(parsed.amount_paid, 2.39);
+  assert.equal(parsed.returned_deposit, null);
+  assert.equal(parsed.charged_deposit, 0.30);
+  assert.equal(parsed.payment_method, "VISA");
+});
+
 test("parseReceiptDoc: malformed input returns empty results, never throws", () => {
   const c = new JumboClient();
   for (const bad of ["not json", "", "{}", '{"documents":[]}']) {
     const parsed = c.parseReceiptDoc(bad);
     assert.deepEqual(parsed.items, []);
     assert.equal(parsed.total, null);
+    assert.equal(parsed.amount_paid, null);
+    assert.equal(parsed.returned_deposit, null);
+    assert.equal(parsed.charged_deposit, null);
+    assert.equal(parsed.total_discount, null);
+    assert.equal(parsed.subtotal, null);
     assert.equal(parsed.payment_method, null);
+    assert.deepEqual(parsed.vat_breakdown, []);
   }
 });
+
+test("parseReceiptDoc: structured vat_breakdown, total_discount and subtotal", () => {
+  const c = new JumboClient();
+  const parsed = c.parseReceiptDoc(
+    receiptDoc([
+      "OMSCHRIJVING                 BEDRAG IN EUR",
+      "==========================================",
+      "JUMBO TROSTOMATEN                     2,49",
+      "ACTIE TROSTOMATEN                    -1,00",
+      "Totaal                                1,49",
+      "Betaald:                    ",
+      "VISA                                  1,49",
+      "Totaal korting:                      -1,00",
+      "BTW overzicht",
+      "BTW%          Bedrag excl     BTW bedrag",
+      "     9,00%           1,37           0,12",
+      "BTW Totaal           1,37           0,12",
+    ])
+  );
+  assert.equal(parsed.total, 1.49);
+  assert.equal(parsed.subtotal, 2.49);
+  assert.equal(parsed.total_discount, 1.00);
+  assert.deepEqual(parsed.vat_breakdown, [
+    { rate_percent: 9, amount_excl: 1.37, vat_amount: 0.12, amount_incl: 1.49 },
+  ]);
+});
+
+test("getStatiegeldSummary: aggregates deposits over period and calculates net balance", async () => {
+  installFetch((body) => {
+    if (body.query.includes("GetReceiptOverview")) {
+      return json({
+        data: {
+          receiptOverview: {
+            totalResults: 2,
+            pageSize: 25,
+            currentPage: 0,
+            receipts: [
+              {
+                transactionId: "r1.json",
+                purchaseEndOn: "2026-10-18 14:00:00",
+                receiptSource: "DIGITAL",
+                store: { storeId: "3427", name: "Jumbo A" },
+                pointBalance: 0,
+              },
+              {
+                transactionId: "r2.json",
+                purchaseEndOn: "2026-08-19 12:00:00",
+                receiptSource: "DIGITAL",
+                store: { storeId: "3427", name: "Jumbo A" },
+                pointBalance: 0,
+              },
+            ],
+          },
+        },
+      });
+    }
+    if (body.query.includes("GetDigitalReceipt")) {
+      const id = body.variables.transactionId;
+      if (id.includes("r1")) {
+        return json({
+          data: {
+            receipt: {
+              receiptImage: {
+                image: receiptDoc([
+                  "OMSCHRIJVING",
+                  "Melk 1,50",
+                  "Totaal 1,50",
+                  "Betaald:",
+                  "Ret emballage gekoppeld 2,50",
+                  "VISA 0,00",
+                ]),
+              },
+              store: { storeId: "3427", name: "Jumbo A" },
+              purchaseEndOn: "2026-10-18 14:00:00",
+            },
+          },
+        });
+      } else {
+        return json({
+          data: {
+            receipt: {
+              receiptImage: {
+                image: receiptDoc([
+                  "OMSCHRIJVING",
+                  "Sap 2,00",
+                  "STATIEGELD 0,15",
+                  "Totaal 2,15",
+                  "Betaald:",
+                  "VISA 2,15",
+                ]),
+              },
+              store: { storeId: "3427", name: "Jumbo A" },
+              purchaseEndOn: "2026-08-19 12:00:00",
+            },
+          },
+        });
+      }
+    }
+    return json({ data: {} });
+  });
+
+  const client = new JumboClient();
+  const summary = await client.getStatiegeldSummary({ year: 2026 });
+  assert.equal(summary.receipts_scanned, 2);
+  assert.equal(summary.total_returned, 2.50);
+  assert.equal(summary.total_charged, 0.15);
+  assert.equal(summary.net_returned, 2.35);
+  assert.equal(summary.trips_with_returned_deposit, 1);
+  assert.equal(summary.trips_with_charged_deposit, 1);
+  assert.equal(summary.receipts.length, 2);
+});
+
+
