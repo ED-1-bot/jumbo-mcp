@@ -153,6 +153,8 @@ const OPERATION_CACHE_PREDICATE: Record<string, (data: any) => boolean> = {
     const typename = data?.returnedDeposits?.__typename;
     return !typename || typename === "ReturnedDepositsResponseSuccess";
   },
+  // A product that the API cannot resolve stays retryable.
+  ProductDetail: (data) => Boolean(data?.product),
 };
 
 export class JumboClient {

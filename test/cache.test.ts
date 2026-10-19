@@ -309,6 +309,30 @@ describe("client.ts - response cache", () => {
     assert.equal(calls.length, 2);
   });
 
+  it("does not cache a product the API cannot resolve", async () => {
+    const client = new JumboClient();
+    (globalThis as any).fetch = async (_url: string, init: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      calls.push(op(body) || "raw");
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { data: { product: null } };
+        },
+        async text() {
+          return JSON.stringify({ data: { product: null } });
+        },
+      };
+    };
+
+    await client.executeGraphql("query ProductDetail { p }", { sku: "gone" });
+    await client.executeGraphql("query ProductDetail { p }", { sku: "gone" });
+
+    assert.equal(calls.length, 2, "an unresolved product must stay retryable");
+    assert.equal(client.cacheStats().entries, 0);
+  });
+
   it("does not share a cache entry between different GraphQL documents", async () => {
     const client = new JumboClient();
 
