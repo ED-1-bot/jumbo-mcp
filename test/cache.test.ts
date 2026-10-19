@@ -156,15 +156,21 @@ describe("client.ts - response cache", () => {
 
     (globalThis as any).fetch = async (_url: string, init: any) => {
       const body = init?.body ? JSON.parse(init.body) : null;
-      calls.push(op(body) || "raw");
+      const name = op(body);
+      calls.push(name || "raw");
+      const data: any = { ok: true };
+      if (name === "GetDigitalReceipt") data.receipt = { receiptImage: { image: "x" } };
+      if (name === "GetDeposits") {
+        data.returnedDeposits = { __typename: "ReturnedDepositsResponseSuccess" };
+      }
       return {
         ok: true,
         status: 200,
         async json() {
-          return { data: { ok: true } };
+          return { data };
         },
         async text() {
-          return JSON.stringify({ data: { ok: true } });
+          return JSON.stringify({ data });
         },
       };
     };
@@ -172,6 +178,7 @@ describe("client.ts - response cache", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    process.env.JUMBO_TOKEN = "test-jumbo-token";
     if (originalCacheEnv !== undefined) {
       process.env.JUMBO_MCP_CACHE = originalCacheEnv;
     } else {
@@ -219,6 +226,78 @@ describe("client.ts - response cache", () => {
 
     await client.executeGraphql("query GetDigitalReceipt { receipt { id } }", { id: "r-2" });
     assert.equal(calls.length, 2, "a different receipt is a different cache entry");
+  });
+
+  it("does not cache a receipt the API cannot resolve", async () => {
+    const client = new JumboClient();
+    (globalThis as any).fetch = async (_url: string, init: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      calls.push(op(body) || "raw");
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { data: { receipt: null } };
+        },
+        async text() {
+          return JSON.stringify({ data: { receipt: null } });
+        },
+      };
+    };
+
+    await client.executeGraphql("query GetDigitalReceipt { receipt { id } }", { id: "r-1" });
+    await client.executeGraphql("query GetDigitalReceipt { receipt { id } }", { id: "r-1" });
+
+    assert.equal(calls.length, 2, "a null receipt must stay retryable");
+    assert.equal(client.cacheStats().entries, 0);
+  });
+
+  it("does not cache a deposits error union", async () => {
+    const client = new JumboClient();
+    (globalThis as any).fetch = async (_url: string, init: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      calls.push(op(body) || "raw");
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            data: { returnedDeposits: { __typename: "ReturnedDepositsError" } },
+          };
+        },
+        async text() {
+          return JSON.stringify({
+            data: { returnedDeposits: { __typename: "ReturnedDepositsError" } },
+          });
+        },
+      };
+    };
+
+    await client.executeGraphql("query GetDeposits { deposits { sku } }", { orderId: "o-1" });
+    await client.executeGraphql("query GetDeposits { deposits { sku } }", { orderId: "o-1" });
+
+    assert.equal(calls.length, 2, "an error union must not be replayed from cache");
+    assert.equal(client.cacheStats().entries, 0);
+  });
+
+  it("scopes cache entries to the authenticated principal", async () => {
+    process.env.JUMBO_TOKEN = "principal-a";
+    const client = new JumboClient();
+
+    await client.executeGraphql("query GetStoreList { stores { id } }");
+    await client.executeGraphql("query GetStoreList { stores { id } }");
+    assert.equal(calls.length, 1);
+
+    // A re-login under another account must not read the previous cache.
+    process.env.JUMBO_TOKEN = "principal-b";
+    await client.executeGraphql("query GetStoreList { stores { id } }");
+    assert.equal(calls.length, 2);
+    assert.equal(client.cacheStats().entries, 1);
+  });
+
+  it("falls back to the default size cap when the configured one is invalid", () => {
+    const cache = new TtlCache({ maxEntries: Number("1k") });
+    assert.equal(cache.stats().maxEntries, 500);
   });
 
   it("does not share a cache entry between different variables", async () => {

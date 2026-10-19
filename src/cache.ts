@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 
 export interface CacheStats {
   enabled: boolean;
+  maxEntries: number;
   hits: number;
   misses: number;
   sets: number;
@@ -61,7 +62,11 @@ export class TtlCache {
 
   constructor(options: TtlCacheOptions = {}) {
     this.enabled = options.enabled !== false;
-    this.maxEntries = Math.max(1, options.maxEntries ?? 500);
+    const requested = options.maxEntries;
+    this.maxEntries =
+      typeof requested === "number" && Number.isFinite(requested)
+        ? Math.max(1, Math.floor(requested))
+        : 500;
     this.now = options.now ?? (() => Date.now());
   }
 
@@ -124,9 +129,16 @@ export class TtlCache {
 
   /**
    * Return the cached value or load it once. Parallel identical calls share a
-   * single upstream request. Errors are never cached.
+   * single upstream request. Errors are never cached. `shouldCache` lets a
+   * caller reject a *successful* response that carries a domain-level failure
+   * (a null receipt, an error union), which must never be replayed later.
    */
-  async wrap<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
+  async wrap<T>(
+    key: string,
+    ttlMs: number,
+    loader: () => Promise<T>,
+    shouldCache?: (value: T) => boolean
+  ): Promise<T> {
     if (!this.enabled || ttlMs <= 0) {
       return await loader();
     }
@@ -139,7 +151,9 @@ export class TtlCache {
 
     const promise = (async () => {
       const value = await loader();
-      this.set(key, value, ttlMs);
+      if (shouldCache ? shouldCache(value) : true) {
+        this.set(key, value, ttlMs);
+      }
       return value;
     })().finally(() => {
       this.inflight.delete(key);
@@ -153,6 +167,7 @@ export class TtlCache {
     const total = this.hits + this.misses;
     return {
       enabled: this.enabled,
+      maxEntries: this.maxEntries,
       hits: this.hits,
       misses: this.misses,
       sets: this.sets,

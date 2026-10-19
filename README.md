@@ -187,8 +187,10 @@ make the assistant re-add an item you just added.
 * **Kill switch:** set `JUMBO_MCP_CACHE=off` to disable the cache entirely.
   `JUMBO_MCP_CACHE_MAX_ENTRIES` caps the number of cached responses
   (default 500).
-* **Verify it:** call `jumbo_cache_stats`, or run `npm run status`, which
-  prints hit/miss counters for the running process.
+* **Verify it:** call `jumbo_cache_stats` for the live hit/miss counters of the
+  running server. `npm run status` prints the cache *configuration* (enabled
+  state and size cap) — it starts a separate process, so it cannot show the
+  running server's counters.
 
 ---
 

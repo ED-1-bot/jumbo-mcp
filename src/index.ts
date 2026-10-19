@@ -75,9 +75,9 @@ async function showStatus(): Promise<void> {
 
   const cacheStats = client.cacheStats();
   console.log(
-    `Response cache: ${cacheStats.enabled ? "enabled" : "disabled"} — ${cacheStats.entries} entries, ` +
-      `${cacheStats.hits} hits / ${cacheStats.misses} misses ` +
-      `(hit rate ${(cacheStats.hitRate * 100).toFixed(1)}%)`
+    `Response cache: ${cacheStats.enabled ? "enabled" : "disabled"} — ` +
+      `max ${cacheStats.maxEntries} entries. ` +
+      `Call jumbo_cache_stats for live hit/miss counters of the running server.`
   );
 
   const hasRefresh = Boolean(tokens.refresh_token);
@@ -110,7 +110,7 @@ async function showStatus(): Promise<void> {
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "jumbo-mcp",
-    version: "0.3.1",
+    version: "0.4.0",
   });
 
   // Tool: Login (Agent auth verification)

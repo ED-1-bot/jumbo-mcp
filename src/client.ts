@@ -141,11 +141,26 @@ const OPERATION_TTL: Record<string, number> = {
 
 const OPERATION_NAME_RE = /(?:query|mutation)\s+(\w+)/;
 
+/**
+ * Operations whose *successful* GraphQL payload can still carry a domain-level
+ * failure. Such a response must never be cached: a receipt that becomes
+ * resolvable later would stay hidden, and an error union would be replayed for
+ * the whole TTL. Mirrors the error conditions in the calling methods.
+ */
+const OPERATION_CACHE_PREDICATE: Record<string, (data: any) => boolean> = {
+  GetDigitalReceipt: (data) => Boolean(data?.receipt),
+  GetDeposits: (data) => {
+    const typename = data?.returnedDeposits?.__typename;
+    return !typename || typename === "ReturnedDepositsResponseSuccess";
+  },
+};
+
 export class JumboClient {
   private userAgent =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
   private readonly cache: TtlCache;
+  private lastAuthScope: string | null = null;
 
   constructor(cache?: TtlCache) {
     this.cache =
@@ -158,6 +173,23 @@ export class JumboClient {
 
   cacheStats(): CacheStats {
     return this.cache.stats();
+  }
+
+  /**
+   * Fingerprint of the credential in use. It keeps a re-login (a new token
+   * file) from serving the previous account's cached data, and it clears the
+   * cache when the principal actually changes. The raw credential never
+   * appears in the key: only its digest does.
+   */
+  private async authScope(accessTokenOverride?: string): Promise<string> {
+    const headers = await this.getAuthHeaders(accessTokenOverride);
+    const material = headers.Authorization ?? headers.Cookie ?? "anonymous";
+    const scope = cacheKey("auth", [material]).split(" ").pop()!;
+    if (this.lastAuthScope !== null && this.lastAuthScope !== scope) {
+      this.cache.clear();
+    }
+    this.lastAuthScope = scope;
+    return scope;
   }
 
   /** Last candidate form that resolved a receipt on `GetDigitalReceipt`. */
@@ -224,15 +256,23 @@ export class JumboClient {
       );
     }
 
-    const key = cacheKey(`POST ${GRAPHQL_URL} ${operationName}`, [variables ?? {}]);
-    return await this.cache.wrap<T>(key, ttl, () =>
-      this.executeGraphqlRaw<T>(
-        query,
-        variables,
-        clientName,
-        retryOn401,
-        accessTokenOverride
-      )
+    const scope = await this.authScope(accessTokenOverride);
+    const key = cacheKey(`POST ${GRAPHQL_URL} ${operationName}`, [
+      scope,
+      variables ?? {},
+    ]);
+    return await this.cache.wrap<T>(
+      key,
+      ttl,
+      () =>
+        this.executeGraphqlRaw<T>(
+          query,
+          variables,
+          clientName,
+          retryOn401,
+          accessTokenOverride
+        ),
+      OPERATION_CACHE_PREDICATE[operationName]
     );
   }
 
@@ -2155,7 +2195,11 @@ async function resolveCoordinates(
           const res = await fetch(geoUrl, {
             headers: { "User-Agent": "jumbo-mcp/0.4.0" },
           });
-          if (!res.ok) return [];
+          // A failed lookup must not be cached: an empty result would look
+          // like "no coordinates" and silently pin the fallback for 24 hours.
+          if (!res.ok) {
+            throw new Error(`Nominatim lookup failed (HTTP ${res.status})`);
+          }
           return (await res.json()) as any[];
         }
       );
