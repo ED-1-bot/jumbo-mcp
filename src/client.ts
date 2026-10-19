@@ -257,8 +257,14 @@ export class JumboClient {
     }
 
     const scope = await this.authScope(accessTokenOverride);
+    // The document text and the client name are part of the key: two
+    // different GraphQL documents can share an operation name and variables
+    // (e.g. `SearchProductsByKeyword` used for search and for recommendations)
+    // while requesting different fields.
     const key = cacheKey(`POST ${GRAPHQL_URL} ${operationName}`, [
       scope,
+      clientName,
+      query,
       variables ?? {},
     ]);
     return await this.cache.wrap<T>(

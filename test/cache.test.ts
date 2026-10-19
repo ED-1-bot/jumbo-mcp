@@ -309,6 +309,23 @@ describe("client.ts - response cache", () => {
     assert.equal(calls.length, 2);
   });
 
+  it("does not share a cache entry between different GraphQL documents", async () => {
+    const client = new JumboClient();
+
+    // Same operation name, same variables, different selection sets: the
+    // responses carry different fields and must not share an entry.
+    await client.executeGraphql(
+      "query SearchProductsByKeyword { products { id } }",
+      { query: "melk" }
+    );
+    await client.executeGraphql(
+      "query SearchProductsByKeyword { products { name url } }",
+      { query: "melk" }
+    );
+
+    assert.equal(calls.length, 2);
+  });
+
   it("refetches once the TTL has expired", async () => {
     let now = 1_000_000;
     const cache = new TtlCache({ now: () => now });
