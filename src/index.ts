@@ -73,6 +73,13 @@ async function showStatus(): Promise<void> {
   console.log("=" .repeat(60));
   console.log(`Token storage: ${getTokensFilePath()}`);
 
+  const cacheStats = client.cacheStats();
+  console.log(
+    `Response cache: ${cacheStats.enabled ? "enabled" : "disabled"} — ${cacheStats.entries} entries, ` +
+      `${cacheStats.hits} hits / ${cacheStats.misses} misses ` +
+      `(hit rate ${(cacheStats.hitRate * 100).toFixed(1)}%)`
+  );
+
   const hasRefresh = Boolean(tokens.refresh_token);
   console.log(`Refresh Token: ${hasRefresh ? "✅ Active (Permanent)" : "❌ Missing"}`);
   console.log(`Last Saved:    ${tokens.saved_at || "Unknown"}`);
@@ -594,6 +601,15 @@ export function createServer(): McpServer {
                 return toolError(error);
               }
             });
+
+  server.registerTool("jumbo_cache_stats", { title: "Get Jumbo Response Cache Statistics", description: "Report the in-process response cache: enabled state, hits, misses, hit rate, stored entries and evictions. Use to verify that cached Jumbo responses are reused instead of re-fetched.", annotations: { readOnlyHint: true }, inputSchema: z.object({}) }, async () => {
+    try {
+      const stats = client.cacheStats();
+      return { content: [{ type: "text", text: JSON.stringify(stats, null, 2) }] };
+    } catch (error: any) {
+      return toolError(error);
+    }
+  });
 
   return server;
 }

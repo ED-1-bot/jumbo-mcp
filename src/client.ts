@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getValidAccessToken, refreshTokens } from "./auth.js";
+import { CacheStats, TtlCache, cacheKey } from "./cache.js";
 import {
   LoyaltyProfile,
   ReceiptDetails,
@@ -87,9 +88,77 @@ export type ReceiptIdForm = "raw" | "stem" | "uuid" | "prefix";
 const RECEIPT_KEY_UUID_RE =
   /^(.+)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
+/**
+ * City -> coordinates lookups are not customer-specific, so they live in a
+ * module-level cache. Nominatim asks for at most one request per second;
+ * caching keeps a repeated store search from hammering it.
+ */
+const geocodeCache = new TtlCache({
+  enabled: process.env.JUMBO_MCP_CACHE !== "off",
+  maxEntries: 200,
+});
+
+/**
+ * Cache TTLs in milliseconds. Only immutable or slow-moving upstream data is
+ * cached — live customer state (profile, basket, shopping list, balance,
+ * stamps, receipt overview) is always fetched live.
+ */
+export const CACHE_TTL = {
+  /** Search results and promo prices: offers churn daily. */
+  search: 30 * 60 * 1000,
+  /** Product detail: a product's page is stable for a day. */
+  productDetail: 24 * 60 * 60 * 1000,
+  /** Store list, promotions and other near-static reference data. */
+  catalog: 24 * 60 * 60 * 1000,
+  /** Bonus folder, promotions and clearance-style markdowns. */
+  offers: 30 * 60 * 1000,
+  /** A closed receipt (and its deposit lines) is immutable; 30 days covers corrections. */
+  receiptDetail: 30 * 24 * 60 * 60 * 1000,
+  /** City -> coordinates geocoding: a city does not move. */
+  geocode: 24 * 60 * 60 * 1000,
+} as const;
+
+/**
+ * Allowlist by GraphQL operation. Anything not listed is fetched live, so a
+ * new operation is uncached until it is classified.
+ */
+const OPERATION_TTL: Record<string, number> = {
+  // Catalogue
+  GetStoreList: CACHE_TTL.catalog,
+  ProductDetail: CACHE_TTL.productDetail,
+  SearchProductsByKeyword: CACHE_TTL.search,
+  PromoDigestSearch: CACHE_TTL.search,
+  // Offers
+  getPromotions: CACHE_TTL.offers,
+  PromoDigestCustomerPromotions: CACHE_TTL.offers,
+  // Immutable per-record data
+  GetDigitalReceipt: CACHE_TTL.receiptDetail,
+  GetDeposits: CACHE_TTL.receiptDetail,
+  // Never cached (live customer state):
+  // GetProfile, GetReceiptOverview, GetBalance, GetShoppingList, GetStamps,
+  // ActiveBasket
+};
+
+const OPERATION_NAME_RE = /(?:query|mutation)\s+(\w+)/;
+
 export class JumboClient {
   private userAgent =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+  private readonly cache: TtlCache;
+
+  constructor(cache?: TtlCache) {
+    this.cache =
+      cache ??
+      new TtlCache({
+        enabled: process.env.JUMBO_MCP_CACHE !== "off",
+        maxEntries: Number(process.env.JUMBO_MCP_CACHE_MAX_ENTRIES ?? 500),
+      });
+  }
+
+  cacheStats(): CacheStats {
+    return this.cache.stats();
+  }
 
   /** Last candidate form that resolved a receipt on `GetDigitalReceipt`. */
   private preferredReceiptIdForm: ReceiptIdForm | null = null;
@@ -130,7 +199,44 @@ export class JumboClient {
     );
   }
 
+  /**
+   * Cached entry point for every GraphQL call. Only operations on the
+   * allowlist are cached; everything else goes straight to the API, so live
+   * customer state is never served stale.
+   */
   async executeGraphql<T = any>(
+    query: string,
+    variables?: Record<string, any>,
+    clientName: string = "JUMBO_WEB-loyalty",
+    retryOn401: boolean = true,
+    accessTokenOverride?: string
+  ): Promise<T> {
+    const operationName = OPERATION_NAME_RE.exec(query)?.[1] ?? "";
+    const ttl = OPERATION_TTL[operationName];
+
+    if (ttl === undefined) {
+      return await this.executeGraphqlRaw<T>(
+        query,
+        variables,
+        clientName,
+        retryOn401,
+        accessTokenOverride
+      );
+    }
+
+    const key = cacheKey(`POST ${GRAPHQL_URL} ${operationName}`, [variables ?? {}]);
+    return await this.cache.wrap<T>(key, ttl, () =>
+      this.executeGraphqlRaw<T>(
+        query,
+        variables,
+        clientName,
+        retryOn401,
+        accessTokenOverride
+      )
+    );
+  }
+
+  private async executeGraphqlRaw<T = any>(
     query: string,
     variables?: Record<string, any>,
     clientName: string = "JUMBO_WEB-loyalty",
@@ -167,7 +273,7 @@ export class JumboClient {
       // returned promise asynchronously, escapes this try/catch, and surfaces to
       // the caller as a raw transport error instead of an actionable one.
       const fresh = await refreshTokens();
-      return await this.executeGraphql<T>(
+      return await this.executeGraphqlRaw<T>(
         query,
         variables,
         clientName,
@@ -193,7 +299,7 @@ export class JumboClient {
         // Renew once, then replay with the NEW token explicitly. If this still
         // fails the session is genuinely dead -- say so, don't leak raw text.
         const fresh = await refreshTokens();
-        return await this.executeGraphql<T>(
+        return await this.executeGraphqlRaw<T>(
           query,
           variables,
           clientName,
@@ -2039,15 +2145,22 @@ async function resolveCoordinates(
       };
     }
     try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ", Netherlands")}&format=json&limit=1`,
-        { headers: { "User-Agent": "jumbo-mcp/0.3.1" } }
-      );
-      if (res.ok) {
-        const data: any = await res.json();
-        if (Array.isArray(data) && data.length > 0 && data[0].lat && data[0].lon) {
-          return { lat: String(data[0].lat), lon: String(data[0].lon) };
+      const geoUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
+        query + ", Netherlands"
+      )}&format=json&limit=1`;
+      const data = await geocodeCache.wrap<any[]>(
+        cacheKey("GET https://nominatim.openstreetmap.org/search", [query]),
+        CACHE_TTL.geocode,
+        async () => {
+          const res = await fetch(geoUrl, {
+            headers: { "User-Agent": "jumbo-mcp/0.4.0" },
+          });
+          if (!res.ok) return [];
+          return (await res.json()) as any[];
         }
+      );
+      if (Array.isArray(data) && data.length > 0 && data[0].lat && data[0].lon) {
+        return { lat: String(data[0].lat), lon: String(data[0].lon) };
       }
     } catch {
       // Fallback
