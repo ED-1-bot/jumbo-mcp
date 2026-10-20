@@ -353,10 +353,30 @@ describe("client.ts - response cache", () => {
   it("does not share a cache entry between different variables", async () => {
     const client = new JumboClient();
 
-    await client.executeGraphql("query ProductDetail { p }", { sku: "a" });
-    await client.executeGraphql("query ProductDetail { p }", { sku: "b" });
+    // The payload must be cacheable, or the predicate — not the key — is what
+    // keeps the two calls apart and the test proves nothing.
+    (globalThis as any).fetch = async (_url: string, init: any) => {
+      const body = init?.body ? JSON.parse(init.body) : null;
+      calls.push(op(body) || "raw");
+      const payload = { data: { product: { sku: body?.variables?.sku } } };
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return payload;
+        },
+        async text() {
+          return JSON.stringify(payload);
+        },
+      };
+    };
 
-    assert.equal(calls.length, 2);
+    await client.executeGraphql("query ProductDetail { p }", { sku: "a" });
+    await client.executeGraphql("query ProductDetail { p }", { sku: "a" });
+    assert.equal(calls.length, 1, "identical variables must reuse the entry");
+
+    await client.executeGraphql("query ProductDetail { p }", { sku: "b" });
+    assert.equal(calls.length, 2, "different variables must not share the entry");
   });
 
   it("does not cache a product the API cannot resolve", async () => {
