@@ -499,6 +499,34 @@ describe("client.ts - response cache", () => {
     assert.deepEqual(second.returned, first.returned);
   });
 
+  it("sends the credentials the cache key was built from", async () => {
+    const client = new JumboClient();
+    const sentAuthorization: string[] = [];
+
+    // Drop the credential while the request is in flight: a second credential
+    // resolution would throw instead of sending, which is exactly the drift the
+    // snapshot prevents.
+    (globalThis as any).fetch = async (_url: string, init: any) => {
+      sentAuthorization.push(init.headers.Authorization);
+      delete process.env.JUMBO_TOKEN;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { data: { storesByListing: [] } };
+        },
+        async text() {
+          return JSON.stringify({ data: { storesByListing: [] } });
+        },
+      };
+    };
+
+    await client.executeGraphql("query GetStoreList { stores { id } }");
+
+    assert.equal(sentAuthorization.length, 1);
+    assert.equal(sentAuthorization[0], "Bearer test-jumbo-token");
+  });
+
   it("reports the response-cache cap apart from the combined capacity", () => {
     const client = new JumboClient(new TtlCache({ maxEntries: 100 }));
 

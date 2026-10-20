@@ -210,13 +210,16 @@ export class JumboClient {
   }
 
   /**
-   * Fingerprint of the credential in use. It keeps a re-login (a new token
-   * file) from serving the previous account's cached data, and it clears the
-   * cache when the principal actually changes. The raw credential never
-   * appears in the key: only its digest does.
+   * Fingerprint of the credential snapshot the request will be sent with. It
+   * keeps a re-login (a new token file) from serving the previous account's
+   * cached data, and it clears the cache when the principal actually changes.
+   * The raw credential never appears in the key: only its digest does.
+   *
+   * The headers are passed in, not resolved here: the key and the request must
+   * describe the same credentials, or a re-login between the two could store
+   * account B's response under account A's key.
    */
-  private async authScope(accessTokenOverride?: string): Promise<string> {
-    const headers = await this.getAuthHeaders(accessTokenOverride);
+  private authScope(headers: Record<string, string>): string {
     // Scope on the account, not on the credential. A refreshed access token is a
     // different string for the same customer, so hashing the header would drop
     // the long-lived receipt and deposit entries on every refresh.
@@ -299,7 +302,8 @@ export class JumboClient {
       );
     }
 
-    const scope = await this.authScope(accessTokenOverride);
+    const authHeaders = await this.getAuthHeaders(accessTokenOverride);
+    const scope = this.authScope(authHeaders);
     // The document text and the client name are part of the key: two
     // different GraphQL documents can share an operation name and variables
     // (e.g. `SearchProductsByKeyword` used for search and for recommendations)
@@ -319,7 +323,8 @@ export class JumboClient {
           variables,
           clientName,
           retryOn401,
-          accessTokenOverride
+          accessTokenOverride,
+          authHeaders
         ),
       OPERATION_CACHE_PREDICATE[operationName]
     );
@@ -330,9 +335,13 @@ export class JumboClient {
     variables?: Record<string, any>,
     clientName: string = "JUMBO_WEB-loyalty",
     retryOn401: boolean = true,
-    accessTokenOverride?: string
+    accessTokenOverride?: string,
+    authHeadersOverride?: Record<string, string>
   ): Promise<T> {
-    const authHeaders = await this.getAuthHeaders(accessTokenOverride);
+    // A caller that already resolved credentials (the cache path) passes them in
+    // so the request cannot drift onto a different principal than its cache key.
+    const authHeaders =
+      authHeadersOverride ?? (await this.getAuthHeaders(accessTokenOverride));
     const payload: { query: string; variables?: Record<string, any> } = { query };
     if (variables) payload.variables = variables;
 
