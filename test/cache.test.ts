@@ -11,7 +11,7 @@ process.env.JUMBO_TOKEN = "test-jumbo-token";
 process.env.JUMBO_TOKENS_FILE = "/nonexistent/jumbo-mcp/tokens.json";
 delete process.env.JUMBO_REFRESH_TOKEN;
 
-const { JumboClient, CACHE_TTL } = await import("../src/client.js");
+const { JumboClient, CACHE_TTL, GEOCODE_CACHE_MAX_ENTRIES } = await import("../src/client.js");
 const { TtlCache, cacheKey, stableStringify, combineStats } = await import("../src/cache.js");
 const { CUSTOMER_ID_CLAIM } = await import("../src/auth.js");
 
@@ -497,6 +497,13 @@ describe("client.ts - response cache", () => {
     assert.equal(attempts, 1);
     assert.equal(first.returned.total, 0.25);
     assert.deepEqual(second.returned, first.returned);
+  });
+
+  it("reports the response-cache cap apart from the combined capacity", () => {
+    const client = new JumboClient(new TtlCache({ maxEntries: 100 }));
+
+    assert.equal(client.responseCacheMaxEntries, 100);
+    assert.equal(client.cacheStats().maxEntries, 100 + GEOCODE_CACHE_MAX_ENTRIES);
   });
 
   it("keeps the cache across a token refresh for the same customer", async () => {

@@ -104,9 +104,11 @@ const cachingEnabled = () => process.env.JUMBO_MCP_CACHE !== "off";
  * module-level cache. Nominatim asks for at most one request per second;
  * caching keeps a repeated store search from hammering it.
  */
+export const GEOCODE_CACHE_MAX_ENTRIES = 200;
+
 const geocodeCache = new TtlCache({
   enabled: cachingEnabled,
-  maxEntries: 200,
+  maxEntries: GEOCODE_CACHE_MAX_ENTRIES,
 });
 
 /**
@@ -196,6 +198,15 @@ export class JumboClient {
   cacheStats(): CacheStats {
     const stats = combineStats([this.cache.stats(), geocodeCache.stats()]);
     return { ...stats, enabled: stats.enabled && cachingEnabled() };
+  }
+
+  /**
+   * Capacity of the GraphQL response cache alone: the value
+   * `JUMBO_MCP_CACHE_MAX_ENTRIES` configures. `cacheStats().maxEntries` sums both
+   * caches, so it is not the configured cap.
+   */
+  get responseCacheMaxEntries(): number {
+    return this.cache.stats().maxEntries;
   }
 
   /**

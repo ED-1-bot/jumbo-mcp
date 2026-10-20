@@ -7,7 +7,11 @@ import * as dotenv from "dotenv";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { JumboClient, JumboShoppingListError } from "./client.js";
+import {
+  GEOCODE_CACHE_MAX_ENTRIES,
+  JumboClient,
+  JumboShoppingListError,
+} from "./client.js";
 import {
   decodeJwtPayload,
   getTokensFilePath,
@@ -76,7 +80,8 @@ async function showStatus(): Promise<void> {
   const cacheStats = client.cacheStats();
   console.log(
     `Response cache: ${cacheStats.enabled ? "enabled" : "disabled"} — ` +
-      `max ${cacheStats.maxEntries} entries. ` +
+      `max ${client.responseCacheMaxEntries} entries, plus ` +
+      `${GEOCODE_CACHE_MAX_ENTRIES} for city geocoding. ` +
       `Call jumbo_cache_stats for live hit/miss counters of the running server.`
   );
 
