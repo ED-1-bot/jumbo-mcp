@@ -329,3 +329,20 @@ test("buildEnvelope: carries the configured poll budget", () => {
     assert.equal(buildEnvelope({ order: order(), link: link() }).poll_budget_seconds, 900);
   });
 });
+
+test("buildEnvelope: a withheld retry URL is explained, like a withheld pay URL", () => {
+  const env = buildEnvelope({
+    order: order(),
+    link: link({
+      status: "COMPLETED",
+      result: "Refused",
+      retry_url: "https://evil.example/service/betalen/retry-1",
+    }),
+  });
+  assert.equal(env.state, "FAILED");
+  assert.equal(env.retry_url, null);
+  assert.ok(
+    env.degraded.some((d) => /retry URL is not on an allowed host/i.test(d)),
+    "the README promises this reason for every withheld URL"
+  );
+});

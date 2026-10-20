@@ -267,6 +267,11 @@ export function buildEnvelope(input: {
   // PAID/EXPIRED link must not hand out a URL that can move money again.
   const retryUrl =
     state === "FAILED" && isForwardablePayUrl(rawRetryUrl) ? rawRetryUrl : null;
+  if (state === "FAILED" && rawRetryUrl && !retryUrl) {
+    degraded.push(
+      "The retry URL is not on an allowed host and was withheld; set JUMBO_MCP_PAY_URL_HOSTS to forward it."
+    );
+  }
 
   const envelope: PaymentLinkEnvelope = {
     state,
