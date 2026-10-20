@@ -156,8 +156,10 @@ request volume and speeds up repeat lookups — the promo digest alone resolves
 one receipt detail per receipt, plus a product lookup per basket term.
 
 **Scope:** in memory only, for the lifetime of the running MCP server process.
-Nothing is written to disk, no cache survives a restart, and no cached response
-contains your tokens or customer profile.
+Nothing is written to disk, no cache survives a restart, and entries are scoped
+to the signed-in account. No cached response contains your tokens — but a cached
+receipt detail does carry that receipt's account data (customer ID and loyalty
+card number), which is why it never leaves process memory.
 
 ### What is cached, and for how long
 

@@ -13,6 +13,7 @@ delete process.env.JUMBO_REFRESH_TOKEN;
 
 const { JumboClient, CACHE_TTL } = await import("../src/client.js");
 const { TtlCache, cacheKey, stableStringify, combineStats } = await import("../src/cache.js");
+const { CUSTOMER_ID_CLAIM } = await import("../src/auth.js");
 
 describe("cache.ts - TtlCache", () => {
   it("stores a value and returns it before the TTL expires", () => {
@@ -496,6 +497,23 @@ describe("client.ts - response cache", () => {
     assert.equal(attempts, 1);
     assert.equal(first.returned.total, 0.25);
     assert.deepEqual(second.returned, first.returned);
+  });
+
+  it("keeps the cache across a token refresh for the same customer", async () => {
+    const client = new JumboClient();
+    const jwt = (claims: Record<string, unknown>) =>
+      `header.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+    const firstToken = jwt({ [CUSTOMER_ID_CLAIM]: "customer-1", jti: "first" });
+    const refreshedToken = jwt({ [CUSTOMER_ID_CLAIM]: "customer-1", jti: "second" });
+    const otherCustomerToken = jwt({ [CUSTOMER_ID_CLAIM]: "customer-2", jti: "third" });
+    const query = "query GetStoreList { stores { id } }";
+
+    await client.executeGraphql(query, undefined, "JUMBO_WEB-loyalty", true, firstToken);
+    await client.executeGraphql(query, undefined, "JUMBO_WEB-loyalty", true, refreshedToken);
+    assert.equal(calls.length, 1, "a refreshed token for the same account must keep the cache");
+
+    await client.executeGraphql(query, undefined, "JUMBO_WEB-loyalty", true, otherCustomerToken);
+    assert.equal(calls.length, 2, "a different account must not read the previous account's entry");
   });
 
   it("applies the kill switch to an injected cache", async () => {

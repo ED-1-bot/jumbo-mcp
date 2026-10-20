@@ -1,7 +1,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getValidAccessToken, refreshTokens } from "./auth.js";
+import {
+  CUSTOMER_ID_CLAIM,
+  decodeJwtPayload,
+  getValidAccessToken,
+  refreshTokens,
+} from "./auth.js";
 import { CacheStats, TtlCache, cacheKey, combineStats } from "./cache.js";
 import {
   LoyaltyProfile,
@@ -201,7 +206,14 @@ export class JumboClient {
    */
   private async authScope(accessTokenOverride?: string): Promise<string> {
     const headers = await this.getAuthHeaders(accessTokenOverride);
-    const material = headers.Authorization ?? headers.Cookie ?? "anonymous";
+    // Scope on the account, not on the credential. A refreshed access token is a
+    // different string for the same customer, so hashing the header would drop
+    // the long-lived receipt and deposit entries on every refresh.
+    const bearer = headers.Authorization?.replace(/^Bearer\s+/i, "");
+    const customerId = bearer ? decodeJwtPayload(bearer)[CUSTOMER_ID_CLAIM] : undefined;
+    const material = customerId
+      ? `customer:${customerId}`
+      : headers.Authorization ?? headers.Cookie ?? "anonymous";
     const scope = cacheKey("auth", [material]).split(" ").pop()!;
     if (this.lastAuthScope !== null && this.lastAuthScope !== scope) {
       this.cache.clear();
