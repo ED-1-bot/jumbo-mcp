@@ -307,8 +307,88 @@ test("payment_status: pending stays PROCESSING and keeps the poll interval", asy
   });
 });
 
-// ---------------------------------------------------------------- kill switch
+// --------------------------------------------------- degraded / id validation
 
+test("get_payment_link: a failing order read degrades when a link_id is supplied", async () => {
+  handler = (body: any) => {
+    if (op(body) === "OrderPayment") return json({ errors: [{ message: "order service down" }] });
+    return json({
+      data: {
+        paymentLink: {
+          success: true,
+          result: {
+            uuid: UUID,
+            status: "ACTIVE",
+            result: null,
+            url: PAY_URL,
+            amount: { amount: 4235, currency: "EUR" },
+          },
+        },
+      },
+    });
+  };
+
+  await withServer(async (c) => {
+    const r: any = await c.callTool({
+      name: "jumbo_get_payment_link",
+      arguments: { order_id: 12345, link_id: UUID },
+    });
+    assert.ok(!r.isError, textOf(r));
+    const envelope = payloadOf(r);
+    assert.equal(envelope.state, "AWAITING_PAYMENT");
+    assert.equal(envelope.pay_url, PAY_URL);
+    assert.equal(envelope.settled, null, "no order record means no settlement answer");
+    assert.ok(envelope.degraded.some((d: string) => /Order lookup failed/.test(d)));
+  });
+});
+
+test("get_payment_link: a failing order read with no link_id is a tool error", async () => {
+  handler = (body: any) =>
+    op(body) === "OrderPayment"
+      ? json({ errors: [{ message: "order service down" }] })
+      : json({ data: {} });
+
+  await withServer(async (c) => {
+    const r: any = await c.callTool({
+      name: "jumbo_get_payment_link",
+      arguments: { order_id: 12345 },
+    });
+    assert.equal(r.isError, true);
+  });
+});
+
+test("get_payment_link: a link_id that contradicts the order's pay link is rejected", async () => {
+  const other = "11111111-2222-4333-8444-555555555555";
+  route();
+  calls = [];
+  await withServer(async (c) => {
+    const r: any = await c.callTool({
+      name: "jumbo_get_payment_link",
+      arguments: { order_id: 12345, link_id: other },
+    });
+    assert.equal(r.isError, true);
+    assert.match(textOf(r), /does not match the pay link of order 12345/);
+  });
+  assert.deepEqual(
+    calls.map((x) => x.op),
+    ["OrderPayment"],
+    "a mismatched link must never be read or merged"
+  );
+});
+
+test("get_payment_link: the id comparison is case-insensitive", async () => {
+  route();
+  await withServer(async (c) => {
+    const r: any = await c.callTool({
+      name: "jumbo_get_payment_link",
+      arguments: { order_id: 12345, link_id: UUID.toUpperCase() },
+    });
+    assert.ok(!r.isError, textOf(r));
+    assert.equal(payloadOf(r).state, "AWAITING_PAYMENT");
+  });
+});
+
+// ---------------------------------------------------------------- kill switch
 test("payments: JUMBO_MCP_PAYLINK=off removes the whole payment surface", async () => {
   const before = process.env.JUMBO_MCP_PAYLINK;
   process.env.JUMBO_MCP_PAYLINK = "off";

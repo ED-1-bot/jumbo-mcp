@@ -101,7 +101,9 @@ async function showStatus(): Promise<void> {
  * Resolve a pay-by-link envelope from either handle. The link record is the
  * richer source (amount, reference, retry URL); the order record is the
  * settlement cross-check. A failure on one is not fatal when the other answered —
- * the reason lands in `degraded` instead of aborting the whole call.
+ * the reason lands in `degraded` instead of aborting the whole call. The one
+ * exception is a `link_id` that contradicts the order's own pay link: two
+ * different payments must never be merged into one envelope.
  */
 async function resolvePaymentEnvelope(input: {
   order_id?: number;
@@ -113,11 +115,30 @@ async function resolvePaymentEnvelope(input: {
   }
 
   const degraded: string[] = [];
-  const order = input.order_id != null ? await client.getOrderPayment(input.order_id) : null;
+
+  let order: Awaited<ReturnType<typeof client.getOrderPayment>> | null = null;
+  if (input.order_id != null) {
+    try {
+      order = await client.getOrderPayment(input.order_id);
+    } catch (error: any) {
+      // The link record can still answer on its own; without one, nothing can.
+      if (!input.link_id) throw error;
+      degraded.push(`Order lookup failed: ${error.message}`);
+    }
+  }
+
+  const orderLinkId = order?.pay_url ? parseLinkIdFromUrl(order.pay_url) : null;
+  if (input.link_id && orderLinkId && input.link_id.toLowerCase() !== orderLinkId.toLowerCase()) {
+    // Merging them would report the order's settlement flag against a different
+    // payment — i.e. "PAID" for a link that was never paid.
+    throw new Error(
+      `link_id ${input.link_id} does not match the pay link of order ${order!.order_id}.`
+    );
+  }
 
   let linkId = input.link_id ?? null;
   if (!linkId && order?.pay_url) {
-    linkId = parseLinkIdFromUrl(order.pay_url);
+    linkId = orderLinkId;
     if (!linkId) {
       degraded.push(
         "The order's pay URL carries no link id, so the link record could not be read; state comes from the order only."

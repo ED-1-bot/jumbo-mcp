@@ -67,6 +67,8 @@ export interface PaymentLinkEnvelope {
   retry_url: string | null;
   expires_at: string | null;
   poll_after_seconds: number;
+  /** Hard stop for reconciliation, from `JUMBO_MCP_PAYLINK_BUDGET_SECONDS`. */
+  poll_budget_seconds: number;
   link_status: string | null;
   link_result: string | null;
   /** Why the picture is incomplete — surfaced to the model, never swallowed. */
@@ -239,12 +241,17 @@ export function buildEnvelope(input: {
         : isAuthorized === false
           ? false
           : null;
+  // Same precedence as `settled`: the order flag only names the source when it
+  // actually decided the answer. A link result that settles an unsettled order
+  // must be attributed to the link, not to a flag that reads false.
   const settledSource =
-    isAuthorized === true || isAuthorized === false
+    isAuthorized === true
       ? ("order.paymentLink.isAuthorized" as const)
       : state === "PAID"
         ? ("link.result" as const)
-        : null;
+        : isAuthorized === false
+          ? ("order.paymentLink.isAuthorized" as const)
+          : null;
 
   const rawPayUrl = link?.url ?? order?.pay_url ?? null;
   const rawRetryUrl = link?.retry_url ?? null;
@@ -256,7 +263,10 @@ export function buildEnvelope(input: {
       "The pay URL is not on an allowed host and was withheld; set JUMBO_MCP_PAY_URL_HOSTS to forward it."
     );
   }
-  const retryUrl = isForwardablePayUrl(rawRetryUrl) ? rawRetryUrl : null;
+  // A retry handle only means something while the payment failed: a terminal
+  // PAID/EXPIRED link must not hand out a URL that can move money again.
+  const retryUrl =
+    state === "FAILED" && isForwardablePayUrl(rawRetryUrl) ? rawRetryUrl : null;
 
   const envelope: PaymentLinkEnvelope = {
     state,
@@ -275,6 +285,7 @@ export function buildEnvelope(input: {
       state === "AWAITING_PAYMENT" || state === "PROCESSING"
         ? nextPollSeconds(input.attempt ?? 0)
         : 0,
+    poll_budget_seconds: pollBudgetSeconds(),
     link_status: link?.status ?? null,
     link_result: link?.result ?? null,
     degraded,

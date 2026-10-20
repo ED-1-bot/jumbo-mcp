@@ -268,3 +268,64 @@ test("formatForwardMessage: never mentions a card, CVC or payment credential", (
   const message = formatForwardMessage(env)!;
   assert.doesNotMatch(message, /card|cvc|iban|pan\b/i);
 });
+
+// ------------------------------------------------- review-hardening regression
+
+test("buildEnvelope: a link result that settles an unsettled order is attributed to the link", () => {
+  const env = buildEnvelope({
+    order: order({ is_authorized: false }),
+    link: link({ status: "COMPLETED", result: "Authorised" }),
+  });
+  assert.equal(env.state, "PAID");
+  assert.equal(env.settled, true);
+  assert.equal(
+    env.settled_source,
+    "link.result",
+    "the order flag reads false and did not decide this"
+  );
+});
+
+test("buildEnvelope: the order flag is still named when it decides the answer", () => {
+  const paid = buildEnvelope({ order: order({ is_authorized: true }), link: link() });
+  assert.equal(paid.settled_source, "order.paymentLink.isAuthorized");
+
+  const unpaid = buildEnvelope({ order: order({ is_authorized: false }), link: link() });
+  assert.equal(unpaid.settled, false);
+  assert.equal(unpaid.settled_source, "order.paymentLink.isAuthorized");
+});
+
+test("buildEnvelope: retry_url is exposed only while the state is FAILED", () => {
+  const retry = "https://www.jumbo.com/service/betalen/retry-1";
+
+  const paid = buildEnvelope({
+    order: order({ is_authorized: true }),
+    link: link({ status: "COMPLETED", result: "Authorised", retry_url: retry }),
+  });
+  assert.equal(paid.state, "PAID");
+  assert.equal(paid.retry_url, null, "a settled payment must not hand out a payable URL");
+
+  const expired = buildEnvelope({
+    order: order(),
+    link: link({ status: "EXPIRED", retry_url: retry }),
+  });
+  assert.equal(expired.state, "EXPIRED");
+  assert.equal(expired.retry_url, null);
+
+  const awaiting = buildEnvelope({ order: order(), link: link({ retry_url: retry }) });
+  assert.equal(awaiting.state, "AWAITING_PAYMENT");
+  assert.equal(awaiting.retry_url, null);
+
+  const failed = buildEnvelope({
+    order: order(),
+    link: link({ status: "COMPLETED", result: "Refused", retry_url: retry }),
+  });
+  assert.equal(failed.state, "FAILED");
+  assert.equal(failed.retry_url, retry);
+});
+
+test("buildEnvelope: carries the configured poll budget", () => {
+  assert.equal(buildEnvelope({ order: order(), link: link() }).poll_budget_seconds, 2700);
+  withEnv("JUMBO_MCP_PAYLINK_BUDGET_SECONDS", "900", () => {
+    assert.equal(buildEnvelope({ order: order(), link: link() }).poll_budget_seconds, 900);
+  });
+});
