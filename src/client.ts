@@ -156,7 +156,11 @@ const OPERATION_NAME_RE = /(?:query|mutation)\s+(\w+)/;
 const OPERATION_CACHE_PREDICATE: Record<string, (data: any) => boolean> = {
   GetDigitalReceipt: (data) => Boolean(data?.receipt),
   GetDeposits: (data) => {
-    const typename = data?.returnedDeposits?.__typename;
+    // `returnedDeposits: null` means the deposit record is not available yet,
+    // not that the order returned nothing: caching it would hide deposits that
+    // appear later for the whole TTL.
+    if (!data?.returnedDeposits) return false;
+    const typename = data.returnedDeposits.__typename;
     return !typename || typename === "ReturnedDepositsResponseSuccess";
   },
   // A product that the API cannot resolve stays retryable.
@@ -185,7 +189,8 @@ export class JumboClient {
    * instance cache would hide geocode hits/misses from `jumbo_cache_stats`.
    */
   cacheStats(): CacheStats {
-    return combineStats([this.cache.stats(), geocodeCache.stats()]);
+    const stats = combineStats([this.cache.stats(), geocodeCache.stats()]);
+    return { ...stats, enabled: stats.enabled && cachingEnabled() };
   }
 
   /**
@@ -257,7 +262,9 @@ export class JumboClient {
     accessTokenOverride?: string
   ): Promise<T> {
     const operationName = OPERATION_NAME_RE.exec(query)?.[1] ?? "";
-    const ttl = OPERATION_TTL[operationName];
+    // The kill switch is checked here, not only when the cache is built: an
+    // injected TtlCache must not serve cached responses either.
+    const ttl = cachingEnabled() ? OPERATION_TTL[operationName] : undefined;
 
     if (ttl === undefined) {
       return await this.executeGraphqlRaw<T>(

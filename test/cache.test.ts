@@ -436,6 +436,79 @@ describe("client.ts - response cache", () => {
     assert.equal(calls.length, 1);
   });
 
+  it("does not cache an empty deposits payload", async () => {
+    const client = new JumboClient();
+    let attempts = 0;
+
+    (globalThis as any).fetch = async () => {
+      attempts += 1;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { data: { deposits: [], returnedDeposits: null } };
+        },
+        async text() {
+          return JSON.stringify({ data: { deposits: [], returnedDeposits: null } });
+        },
+      };
+    };
+
+    const first = await client.getDeposits("order-1");
+    const second = await client.getDeposits("order-1");
+
+    assert.equal(attempts, 2, "a null returnedDeposits must stay retryable");
+    assert.deepEqual(first.returned.items, []);
+    assert.deepEqual(second.returned.items, []);
+  });
+
+  it("caches a resolved deposits payload", async () => {
+    const client = new JumboClient();
+    let attempts = 0;
+    const payload = {
+      data: {
+        deposits: [],
+        returnedDeposits: {
+          __typename: "ReturnedDepositsResponseSuccess",
+          returnedDeposits: [{ sku: "s1", price: { amount: 0.25, currency: "EUR" }, returnedByCustomerQuantity: 1 }],
+          returnedDepositsTotalAmount: { amount: 0.25, currency: "EUR" },
+        },
+      },
+    };
+
+    (globalThis as any).fetch = async () => {
+      attempts += 1;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return payload;
+        },
+        async text() {
+          return JSON.stringify(payload);
+        },
+      };
+    };
+
+    const first = await client.getDeposits("order-2");
+    const second = await client.getDeposits("order-2");
+
+    assert.equal(attempts, 1);
+    assert.equal(first.returned.total, 0.25);
+    assert.deepEqual(second.returned, first.returned);
+  });
+
+  it("applies the kill switch to an injected cache", async () => {
+    process.env.JUMBO_MCP_CACHE = "off";
+    const client = new JumboClient(new TtlCache());
+
+    await client.executeGraphql("query GetStoreList { stores { id } }");
+    await client.executeGraphql("query GetStoreList { stores { id } }");
+
+    assert.equal(calls.length, 2);
+    assert.equal(client.cacheStats().enabled, false);
+  });
+
   it("does not cache a GraphQL error response", async () => {
     const client = new JumboClient();
     let attempts = 0;
