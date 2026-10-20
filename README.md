@@ -144,7 +144,7 @@ Run with `JUMBO_REFRESH_TOKEN`:
 | `jumbo_get_deposits` | Statiegeld for one order: catalogue plus deposits returned. | `order_id` (required) |
 | `jumbo_get_statiegeld_summary` | Statiegeld totals: returned, charged, and net balance across receipts in a date range or year. | `year`, `start_date`, `end_date`, `max_receipts` (`50`) |
 | `jumbo_get_stamps` | Digital stamps, active saving (spaar) campaigns, buying-stamps balance. | None |
-| `jumbo_cache_stats` | Response cache counters: enabled, hits, misses, hit rate, entries, evictions. | None |
+| `jumbo_cache_stats` | Combined counters for the response and geocoding caches: enabled, hits, misses, hit rate, entries, evictions. | None |
 
 ---
 
@@ -188,7 +188,8 @@ make the assistant re-add an item you just added.
   `JUMBO_MCP_CACHE_MAX_ENTRIES` caps the number of cached responses
   (default 500).
 * **Verify it:** call `jumbo_cache_stats` for the live hit/miss counters of the
-  running server. `npm run status` prints the cache *configuration* (enabled
+  running server — they cover both the GraphQL response cache and the city
+  geocoding cache, so a store search that reused coordinates is visible. `npm run status` prints the cache *configuration* (enabled
   state and size cap) — it starts a separate process, so it cannot show the
   running server's counters.
 

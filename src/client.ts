@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getValidAccessToken, refreshTokens } from "./auth.js";
-import { CacheStats, TtlCache, cacheKey } from "./cache.js";
+import { CacheStats, TtlCache, cacheKey, combineStats } from "./cache.js";
 import {
   LoyaltyProfile,
   ReceiptDetails,
@@ -89,12 +89,18 @@ const RECEIPT_KEY_UUID_RE =
   /^(.+)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
 /**
+ * Single source of truth for `JUMBO_MCP_CACHE`. Read per operation so the flag
+ * applies to every cache in the process, including ones built before a change.
+ */
+const cachingEnabled = () => process.env.JUMBO_MCP_CACHE !== "off";
+
+/**
  * City -> coordinates lookups are not customer-specific, so they live in a
  * module-level cache. Nominatim asks for at most one request per second;
  * caching keeps a repeated store search from hammering it.
  */
 const geocodeCache = new TtlCache({
-  enabled: process.env.JUMBO_MCP_CACHE !== "off",
+  enabled: cachingEnabled,
   maxEntries: 200,
 });
 
@@ -168,13 +174,18 @@ export class JumboClient {
     this.cache =
       cache ??
       new TtlCache({
-        enabled: process.env.JUMBO_MCP_CACHE !== "off",
+        enabled: cachingEnabled,
         maxEntries: Number(process.env.JUMBO_MCP_CACHE_MAX_ENTRIES ?? 500),
       });
   }
 
+  /**
+   * Counters for every cache the server runs: the GraphQL response cache plus
+   * the module-level geocode cache that backs `searchStores`. Reporting only the
+   * instance cache would hide geocode hits/misses from `jumbo_cache_stats`.
+   */
   cacheStats(): CacheStats {
-    return this.cache.stats();
+    return combineStats([this.cache.stats(), geocodeCache.stats()]);
   }
 
   /**

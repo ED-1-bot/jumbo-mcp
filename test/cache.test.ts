@@ -12,7 +12,7 @@ process.env.JUMBO_TOKENS_FILE = "/nonexistent/jumbo-mcp/tokens.json";
 delete process.env.JUMBO_REFRESH_TOKEN;
 
 const { JumboClient, CACHE_TTL } = await import("../src/client.js");
-const { TtlCache, cacheKey, stableStringify } = await import("../src/cache.js");
+const { TtlCache, cacheKey, stableStringify, combineStats } = await import("../src/cache.js");
 
 describe("cache.ts - TtlCache", () => {
   it("stores a value and returns it before the TTL expires", () => {
@@ -139,6 +139,55 @@ describe("cache.ts - TtlCache", () => {
       cacheKey("POST graphql X", [{ a: 2, b: 1 }])
     );
     assert.notEqual(cacheKey("POST graphql X", [1]), cacheKey("POST graphql X", [2]));
+  });
+
+  it("sums counters across caches and recomputes the hit rate", () => {
+    const combined = combineStats([
+      {
+        enabled: true,
+        maxEntries: 500,
+        hits: 3,
+        misses: 1,
+        sets: 2,
+        evictions: 0,
+        entries: 2,
+        hitRate: 0.75,
+      },
+      {
+        enabled: true,
+        maxEntries: 200,
+        hits: 1,
+        misses: 3,
+        sets: 3,
+        evictions: 1,
+        entries: 3,
+        hitRate: 0.25,
+      },
+    ]);
+
+    assert.deepEqual(combined, {
+      enabled: true,
+      maxEntries: 700,
+      hits: 4,
+      misses: 4,
+      sets: 5,
+      evictions: 1,
+      entries: 5,
+      hitRate: 0.5,
+    });
+  });
+
+  it("reports an empty combined snapshot as disabled with a zero hit rate", () => {
+    assert.deepEqual(combineStats([]), {
+      enabled: false,
+      maxEntries: 0,
+      hits: 0,
+      misses: 0,
+      sets: 0,
+      evictions: 0,
+      entries: 0,
+      hitRate: 0,
+    });
   });
 });
 
@@ -410,5 +459,55 @@ describe("client.ts - response cache", () => {
 
     assert.equal(attempts, 2);
     assert.equal(client.cacheStats().entries, 0);
+  });
+});
+
+describe("client.ts - geocode cache reporting", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const jsonResponse = (payload: unknown) => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return payload;
+    },
+    async text() {
+      return JSON.stringify(payload);
+    },
+  });
+
+  it("includes geocode activity in cacheStats", async () => {
+    let nominatimLookups = 0;
+
+    (globalThis as any).fetch = async (url: string) => {
+      if (String(url).includes("nominatim")) {
+        nominatimLookups += 1;
+        return jsonResponse([{ lat: "52.0286", lon: "5.0833" }]);
+      }
+      return jsonResponse({ data: { storesByCoordinates: { stores: [], totalCount: 0 } } });
+    };
+
+    // The instance cache is disabled, so every counter delta below can only come
+    // from the module-level geocode cache.
+    const client = new JumboClient(new TtlCache({ enabled: false }));
+    const before = client.cacheStats();
+
+    await client.searchStores({ query: "Nieuwegein" });
+    await client.searchStores({ query: "Nieuwegein" });
+
+    const after = client.cacheStats();
+    assert.equal(nominatimLookups, 1, "the second search must reuse the cached coordinates");
+    assert.equal(after.misses - before.misses, 1);
+    assert.equal(after.sets - before.sets, 1);
+    assert.equal(after.hits - before.hits, 1);
+    assert.equal(after.entries - before.entries, 1);
   });
 });

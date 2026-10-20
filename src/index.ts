@@ -602,7 +602,7 @@ export function createServer(): McpServer {
               }
             });
 
-  server.registerTool("jumbo_cache_stats", { title: "Get Jumbo Response Cache Statistics", description: "Report the in-process response cache: enabled state, hits, misses, hit rate, stored entries and evictions. Use to verify that cached Jumbo responses are reused instead of re-fetched.", annotations: { readOnlyHint: true }, inputSchema: z.object({}) }, async () => {
+  server.registerTool("jumbo_cache_stats", { title: "Get Jumbo Response Cache Statistics", description: "Report the in-process caches (GraphQL responses and store geocoding): enabled state, hits, misses, hit rate, stored entries and evictions. Use to verify that cached Jumbo responses are reused instead of re-fetched.", annotations: { readOnlyHint: true }, inputSchema: z.object({}) }, async () => {
     try {
       const stats = client.cacheStats();
       return { content: [{ type: "text", text: JSON.stringify(stats, null, 2) }] };

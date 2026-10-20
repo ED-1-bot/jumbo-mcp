@@ -22,7 +22,12 @@ export interface CacheStats {
 }
 
 export interface TtlCacheOptions {
-  enabled?: boolean;
+  /**
+   * Static flag, or a predicate evaluated per operation. A predicate keeps
+   * `JUMBO_MCP_CACHE=off` authoritative for every cache in the process, even
+   * one constructed before the variable changed.
+   */
+  enabled?: boolean | (() => boolean);
   maxEntries?: number;
   now?: () => number;
 }
@@ -48,10 +53,33 @@ export function cacheKey(prefix: string, parts: unknown[]): string {
   return `${prefix} ${digest}`;
 }
 
+/**
+ * Merge several cache snapshots into the single report a stats surface can
+ * show. Counters and capacities are summed; the hit rate is recomputed over the
+ * combined totals so it is not an average of averages.
+ */
+export function combineStats(caches: CacheStats[]): CacheStats {
+  const sum = (pick: (stats: CacheStats) => number) =>
+    caches.reduce((total, stats) => total + pick(stats), 0);
+  const hits = sum((stats) => stats.hits);
+  const misses = sum((stats) => stats.misses);
+  const requests = hits + misses;
+  return {
+    enabled: caches.some((stats) => stats.enabled),
+    maxEntries: sum((stats) => stats.maxEntries),
+    hits,
+    misses,
+    sets: sum((stats) => stats.sets),
+    evictions: sum((stats) => stats.evictions),
+    entries: sum((stats) => stats.entries),
+    hitRate: requests === 0 ? 0 : Number((hits / requests).toFixed(3)),
+  };
+}
+
 export class TtlCache {
   private readonly store = new Map<string, { value: unknown; expiresAt: number }>();
   private readonly inflight = new Map<string, Promise<unknown>>();
-  private readonly enabled: boolean;
+  private readonly enabledOption: boolean | (() => boolean);
   private readonly maxEntries: number;
   private readonly now: () => number;
 
@@ -61,7 +89,7 @@ export class TtlCache {
   private evictions = 0;
 
   constructor(options: TtlCacheOptions = {}) {
-    this.enabled = options.enabled !== false;
+    this.enabledOption = options.enabled ?? true;
     const requested = options.maxEntries;
     this.maxEntries =
       typeof requested === "number" && Number.isFinite(requested)
@@ -71,11 +99,13 @@ export class TtlCache {
   }
 
   get isEnabled(): boolean {
-    return this.enabled;
+    return typeof this.enabledOption === "function"
+      ? this.enabledOption()
+      : this.enabledOption;
   }
 
   get<T>(key: string): T | undefined {
-    if (!this.enabled) return undefined;
+    if (!this.isEnabled) return undefined;
 
     const entry = this.store.get(key);
     if (!entry) {
@@ -96,7 +126,7 @@ export class TtlCache {
   }
 
   set<T>(key: string, value: T, ttlMs: number): void {
-    if (!this.enabled || ttlMs <= 0) return;
+    if (!this.isEnabled || ttlMs <= 0) return;
 
     if (this.store.has(key)) this.store.delete(key);
     this.store.set(key, { value, expiresAt: this.now() + ttlMs });
@@ -139,7 +169,7 @@ export class TtlCache {
     loader: () => Promise<T>,
     shouldCache?: (value: T) => boolean
   ): Promise<T> {
-    if (!this.enabled || ttlMs <= 0) {
+    if (!this.isEnabled || ttlMs <= 0) {
       return await loader();
     }
 
@@ -166,7 +196,7 @@ export class TtlCache {
   stats(): CacheStats {
     const total = this.hits + this.misses;
     return {
-      enabled: this.enabled,
+      enabled: this.isEnabled,
       maxEntries: this.maxEntries,
       hits: this.hits,
       misses: this.misses,
