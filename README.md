@@ -221,8 +221,11 @@ Safety rails: URLs are forwarded only when they are `https` and on
 `jumbo.com`/`adyen.com` (override with `JUMBO_MCP_PAY_URL_HOSTS`); anything else
 is withheld and reported in `degraded`. `retry_url` is exposed only while the
 state is `FAILED`. A supplied `link_id` that contradicts the order's own pay link
-is rejected rather than merged — reporting one payment's settlement flag against
-another payment's URL is how a stale id turns into a false `PAID`.
+is rejected rather than merged — by id when both sides expose one, otherwise by
+comparing the two pay URLs once the link is in hand. When neither record exposes a
+comparable URL the pair is flagged in `degraded`, never merged silently: reporting
+one payment's settlement flag against another payment's URL is how a stale id
+turns into a false `PAID`.
 `JUMBO_MCP_PAYLINK=off` removes both tools entirely, leaving the read-only
 toolset untouched. Neither tool places an order, cancels one, or accepts card
 data.

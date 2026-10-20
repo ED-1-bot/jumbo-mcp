@@ -110,6 +110,30 @@ const UUID_RE =
   /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
 /**
+ * Compare two pay URLs without the noise: host and path only, so a query string
+ * or a trailing slash cannot make the same payment look different.
+ *
+ * `null` means "not comparable" — one side is missing or unparsable — which the
+ * caller must report rather than treat as a match.
+ */
+export function samePayUrl(
+  a: string | null | undefined,
+  b: string | null | undefined
+): boolean | null {
+  if (!a || !b) return null;
+  let ua: URL;
+  let ub: URL;
+  try {
+    ua = new URL(a.trim());
+    ub = new URL(b.trim());
+  } catch {
+    return null;
+  }
+  const norm = (u: URL) => `${u.host.toLowerCase()}${u.pathname.replace(/\/+$/, "")}`;
+  return norm(ua) === norm(ub);
+}
+
+/**
  * The pay page is `/service/betalen/{linkId}`; the app resolves the id the same
  * way (last path segment, UUID-shaped). Returns null rather than guessing when
  * the URL is an opaque PSP-hosted page.

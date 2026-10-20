@@ -388,6 +388,120 @@ test("get_payment_link: the id comparison is case-insensitive", async () => {
   });
 });
 
+test("get_payment_link: an opaque order URL plus a different link URL is rejected", async () => {
+  const orderUrl = "https://checkoutshopper-live.adyen.com/pay/order-a";
+  const linkUrl = "https://checkoutshopper-live.adyen.com/pay/link-b";
+  handler = (body: any) => {
+    if (op(body) === "OrderPayment") {
+      return json({
+        data: {
+          order: {
+            orderId: 12345,
+            fulfilmentType: "HOME_DELIVERY",
+            paymentMethod: "online",
+            paymentLink: { url: orderUrl, isAuthorized: true },
+          },
+        },
+      });
+    }
+    return json({
+      data: {
+        paymentLink: {
+          success: true,
+          result: { uuid: UUID, status: "ACTIVE", result: null, url: linkUrl },
+        },
+      },
+    });
+  };
+
+  await withServer(async (c) => {
+    const r: any = await c.callTool({
+      name: "jumbo_payment_status",
+      arguments: { order_id: 12345, link_id: UUID },
+    });
+    assert.equal(r.isError, true, "two different payments must never be merged");
+    assert.match(textOf(r), /belongs to a different payment than order 12345/);
+  });
+});
+
+test("get_payment_link: an identical opaque URL pair is accepted", async () => {
+  const same = "https://checkoutshopper-live.adyen.com/pay/order-a";
+  handler = (body: any) => {
+    if (op(body) === "OrderPayment") {
+      return json({
+        data: {
+          order: {
+            orderId: 12345,
+            fulfilmentType: "HOME_DELIVERY",
+            paymentMethod: "online",
+            paymentLink: { url: same, isAuthorized: false },
+          },
+        },
+      });
+    }
+    return json({
+      data: {
+        paymentLink: { success: true, result: { uuid: UUID, status: "ACTIVE", result: null, url: same } },
+      },
+    });
+  };
+
+  await withServer(async (c) => {
+    const r: any = await c.callTool({
+      name: "jumbo_get_payment_link",
+      arguments: { order_id: 12345, link_id: UUID },
+    });
+    assert.ok(!r.isError, textOf(r));
+    const envelope = payloadOf(r);
+    assert.equal(envelope.state, "AWAITING_PAYMENT");
+    assert.deepEqual(envelope.degraded, [], "matching URLs need no warning");
+  });
+});
+
+test("get_payment_link: an order without a paymentLink cannot be verified and says so", async () => {
+  handler = (body: any) => {
+    if (op(body) === "OrderPayment") {
+      return json({
+        data: {
+          order: {
+            orderId: 12345,
+            fulfilmentType: "HOME_DELIVERY",
+            paymentMethod: "online",
+            paymentLink: null,
+          },
+        },
+      });
+    }
+    return json({
+      data: {
+        paymentLink: {
+          success: true,
+          result: {
+            uuid: UUID,
+            status: "ACTIVE",
+            result: null,
+            url: PAY_URL,
+            amount: { amount: 4235, currency: "EUR" },
+          },
+        },
+      },
+    });
+  };
+
+  await withServer(async (c) => {
+    const r: any = await c.callTool({
+      name: "jumbo_get_payment_link",
+      arguments: { order_id: 12345, link_id: UUID },
+    });
+    assert.ok(!r.isError, textOf(r));
+    const envelope = payloadOf(r);
+    assert.ok(
+      envelope.degraded.some((d: string) => /Could not verify that link/.test(d)),
+      "an unverifiable pair must be reported, not merged silently"
+    );
+  });
+});
+
 // ---------------------------------------------------------------- kill switch
 test("payments: JUMBO_MCP_PAYLINK=off removes the whole payment surface", async () => {
   const before = process.env.JUMBO_MCP_PAYLINK;

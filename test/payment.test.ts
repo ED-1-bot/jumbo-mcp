@@ -14,6 +14,7 @@ import {
   parseLinkIdFromUrl,
   payUrlHosts,
   pollBudgetSeconds,
+  samePayUrl,
   type OrderPaymentInfo,
   type PaymentLinkRecord,
 } from "../src/payment.js";
@@ -345,4 +346,34 @@ test("buildEnvelope: a withheld retry URL is explained, like a withheld pay URL"
     env.degraded.some((d) => /retry URL is not on an allowed host/i.test(d)),
     "the README promises this reason for every withheld URL"
   );
+});
+
+// ------------------------------------------------------------- samePayUrl
+
+test("samePayUrl: equal URLs match, ignoring query and trailing slash", () => {
+  assert.equal(samePayUrl(PAY_URL, PAY_URL), true);
+  assert.equal(samePayUrl(PAY_URL, `${PAY_URL}/`), true);
+  assert.equal(samePayUrl(PAY_URL, `${PAY_URL}?ref=mail`), true);
+  assert.equal(samePayUrl(PAY_URL, PAY_URL.replace("www.jumbo.com", "WWW.JUMBO.COM")), true);
+});
+
+test("samePayUrl: a different path or host does not match", () => {
+  assert.equal(samePayUrl(PAY_URL, `https://www.jumbo.com/service/betalen/other`), false);
+  assert.equal(
+    samePayUrl(PAY_URL, `https://checkoutshopper-live.adyen.com/pay/${UUID}`),
+    false
+  );
+});
+
+test("samePayUrl: a missing or unparsable side is 'not comparable', never a match", () => {
+  assert.equal(samePayUrl(PAY_URL, null), null);
+  assert.equal(samePayUrl(null, PAY_URL), null);
+  assert.equal(samePayUrl(undefined, undefined), null);
+  assert.equal(samePayUrl("not a url", PAY_URL), null);
+});
+
+test("samePayUrl: recognises an opaque PSP pair as the same payment", () => {
+  const opaque = "https://checkoutshopper-live.adyen.com/pay/abc";
+  assert.equal(samePayUrl(opaque, opaque), true);
+  assert.equal(samePayUrl(opaque, "https://checkoutshopper-live.adyen.com/pay/zzz"), false);
 });

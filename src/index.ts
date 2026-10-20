@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { JumboClient, JumboShoppingListError } from "./client.js";
-import { buildEnvelope, parseLinkIdFromUrl } from "./payment.js";
+import { buildEnvelope, parseLinkIdFromUrl, samePayUrl } from "./payment.js";
 import {
   decodeJwtPayload,
   getTokensFilePath,
@@ -153,6 +153,25 @@ async function resolvePaymentEnvelope(input: {
     } catch (error: any) {
       if (!order) throw error;
       degraded.push(`Payment-link lookup failed: ${error.message}`);
+    }
+  }
+
+  // The id check above only runs when both sides expose a UUID. An opaque PSP URL,
+  // or an order without a paymentLink, leaves the pair unverified — and an
+  // unverified pair is precisely how one payment's settlement flag gets reported
+  // against another payment's URL. Compare the URLs once the link is in hand, and
+  // say so when they cannot be compared at all.
+  if (order && link && !orderLinkId) {
+    const same = samePayUrl(link.url, order.pay_url);
+    if (same === false) {
+      throw new Error(
+        `link ${link.link_id} belongs to a different payment than order ${order.order_id}.`
+      );
+    }
+    if (same === null) {
+      degraded.push(
+        `Could not verify that link ${link.link_id} belongs to order ${order.order_id}: neither record exposes a comparable pay URL.`
+      );
     }
   }
 
