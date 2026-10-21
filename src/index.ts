@@ -356,9 +356,9 @@ export function createServer(): McpServer {
                 .number()
                 .int()
                 .min(1)
-                .max(30)
+                .max(200)
                 .default(20)
-                .describe("Maximum number of products to return (default: 20, max: 30)"),
+                .describe("Maximum number of products to return (default: 20, max: 200 — Jumbo serves at most 200 per search)"),
             }) }, async ({ query, sort, limit }) => {
               try {
                 const result = await client.searchProducts({ query, sort, limit });

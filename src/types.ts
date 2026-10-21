@@ -146,6 +146,7 @@ export interface ProductSearchItem {
 export interface ProductSearchResult {
   query: string;
   total_count: number;
+  truncated: boolean;
   products: ProductSearchItem[];
 }
 
