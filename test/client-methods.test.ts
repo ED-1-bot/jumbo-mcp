@@ -354,7 +354,9 @@ test("getProductRecommendations: query with no hit returns an empty result", asy
 
 test("searchProducts: maps prices to cents, formats them and prefixes links", async () => {
   installFetch((body) => {
-    assert.deepEqual(body.variables, { input: { searchType: "KEYWORD", searchTerms: "melk", sort: "PRICE_ASC" } });
+    assert.deepEqual(body.variables, {
+      input: { searchType: "KEYWORD", searchTerms: "melk", sort: "PRICE_ASC", limit: 25 },
+    });
     return json({
       data: {
         searchProducts: {
@@ -417,6 +419,37 @@ test("searchProducts: honours limit and tolerates a malformed payload", async ()
   installFetch(() => json({ data: {} }));
   const empty = await new JumboClient().searchProducts({ query: "x" });
   assert.deepEqual(empty.products, []);
+});
+
+test("searchProducts: sends the limit to Jumbo and caps it at 200", async () => {
+  const sent: number[] = [];
+  installFetch((body) => {
+    sent.push(body.variables.input.limit);
+    return json({ data: { searchProducts: { count: 342, products: [] } } });
+  });
+
+  await new JumboClient().searchProducts({ query: "melk", limit: 120 });
+  await new JumboClient().searchProducts({ query: "melk", limit: 5000 });
+
+  assert.deepEqual(sent, [120, 200], "limit must reach Jumbo, clamped to the server window");
+});
+
+test("searchProducts: flags a result set that the 200-product window cannot hold", async () => {
+  const page = Array.from({ length: 200 }, (_, i) => ({
+    title: `P${i}`,
+    sku: `S${i}`,
+    link: "/x",
+    price: { price: 100, promoPrice: null, pricePerUnit: { price: 100 } },
+    availability: { isAvailable: true },
+    promotions: [],
+  }));
+  installFetch(() => json({ data: { searchProducts: { count: 342, products: page } } }));
+
+  const r = await new JumboClient().searchProducts({ query: "melk", limit: 200 });
+
+  assert.equal(r.total_count, 342);
+  assert.equal(r.products.length, 200);
+  assert.equal(r.truncated, true);
 });
 
 // ------------------------------------------------------------------ parseReceiptDoc

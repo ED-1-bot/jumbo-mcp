@@ -37,6 +37,14 @@ import {
 const GRAPHQL_URL = "https://www.jumbo.com/api/graphql";
 
 /**
+ * Jumbo's product search has one pagination knob — `ProductSearchInput.limit` —
+ * and serves at most 200 products per call (a larger limit is silently clamped
+ * server-side). There is no offset/cursor field, so a deep result set can only
+ * be reached by widening the window.
+ */
+const JUMBO_SEARCH_MAX_LIMIT = 200;
+
+/**
  * Raised when a shopping-list mutation returns the `ShoppingListError` union
  * member. Carries the API's `reason` and `errorMessage` verbatim so callers (and
  * the MCP tool layer) can surface them instead of reporting a false success.
@@ -1410,9 +1418,14 @@ export class JumboClient {
       input.sort = options.sort;
     }
 
+    const limit = Math.min(
+      Math.max(1, Math.trunc(options.limit ?? 25)),
+      JUMBO_SEARCH_MAX_LIMIT
+    );
+    input.limit = limit;
+
     const res = await this.executeGraphql<any>(q, { input }, "JUMBO_WEB-loyalty");
     const rawProducts = res?.searchProducts?.products || [];
-    const limit = options.limit ?? 25;
 
     const products: ProductSearchItem[] = rawProducts.slice(0, limit).map((p: any) => {
       const priceCents = p.price?.price ?? 0;
@@ -1435,9 +1448,14 @@ export class JumboClient {
       };
     });
 
+    const totalCount = res?.searchProducts?.count ?? products.length;
+
     return {
       query: options.query,
-      total_count: res?.searchProducts?.count ?? products.length,
+      total_count: totalCount,
+      // Jumbo has no offset/cursor, so a result set larger than the 200-product
+      // window can only be reported as partial — never silently as complete.
+      truncated: totalCount > products.length,
       products,
     };
   }
