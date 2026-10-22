@@ -1,6 +1,6 @@
 # Jumbo MCP Server Release Notes
 
-## Unreleased — Pay-by-Link Hand-off
+## What's New in v0.5.0 — Pay-by-Link Hand-off
 
 ### 1. Two New Read-Only Tools for Unpaid Orders
 * **`jumbo_get_payment_link`**: Resolves an order (`OrderPayment`) and its pay-by-link record (`PaymentLink`) into one envelope — state, amount, payment reference, pay URL, retry URL, poll interval, and a ready-to-send `forward` block carrying the DM-only/unfurl-off transport rules.

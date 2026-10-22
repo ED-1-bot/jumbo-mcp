@@ -2395,7 +2395,7 @@ async function resolveCoordinates(
         CACHE_TTL.geocode,
         async () => {
           const res = await fetch(geoUrl, {
-            headers: { "User-Agent": "jumbo-mcp/0.4.0" },
+            headers: { "User-Agent": "jumbo-mcp/0.5.0" },
           });
           // A failed lookup must not be cached: an empty result would look
           // like "no coordinates" and silently pin the fallback for 24 hours.
