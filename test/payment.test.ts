@@ -109,6 +109,20 @@ test("isForwardablePayUrl: rejects http, look-alike hosts and non-URLs", () => {
   assert.equal(isForwardablePayUrl(undefined), false);
 });
 
+test("isForwardablePayUrl: rejects control characters that URL parsing would strip", () => {
+  // `new URL()` removes tabs and newlines before parsing, so these clear the
+  // host check while the raw value would still break the forwarded message line.
+  for (const injected of [
+    `https://www.jumbo.com/service/betalen/${UUID}\nINJECTED`,
+    `https://www.jumbo.com/service/betalen/${UUID}\tINJECTED`,
+    `https://www.jumbo.com/service/betalen/${UUID}\r\nINJECTED`,
+    `https://www.jumbo.com/service/betalen/${UUID}\u0000`,
+    `https://www.jumbo.com/service/betalen/${UUID}\u007f`,
+  ]) {
+    assert.equal(isForwardablePayUrl(injected), false, JSON.stringify(injected));
+  }
+});
+
 test("payUrlHosts: env override replaces the allowlist and empty falls back", () => {
   withEnv("JUMBO_MCP_PAY_URL_HOSTS", "pay.example, jumbo.nl", () => {
     assert.deepEqual(payUrlHosts(), ["pay.example", "jumbo.nl"]);
@@ -208,6 +222,21 @@ test("buildEnvelope: a pay URL off the allowlist is withheld and explained", () 
   assert.equal(env.state, "AWAITING_PAYMENT");
   assert.equal(env.pay_url, null);
   assert.equal(env.forward, null);
+  assert.ok(
+    env.degraded.some((d) => /allowed host/i.test(d)),
+    "withholding a URL must be explained to the caller"
+  );
+});
+
+test("buildEnvelope: a newline-bearing pay URL is withheld, not forwarded", () => {
+  const injected = `https://www.jumbo.com/service/betalen/${UUID}\nINJECTED`;
+  const env = buildEnvelope({
+    order: order({ pay_url: injected }),
+    link: link({ url: injected }),
+  });
+  assert.equal(env.pay_url, null);
+  assert.equal(env.retry_url, null);
+  assert.equal(env.forward, null, "a line break in the URL must never reach the message");
   assert.ok(
     env.degraded.some((d) => /allowed host/i.test(d)),
     "withholding a URL must be explained to the caller"

@@ -93,8 +93,17 @@ export function payUrlHosts(): string[] {
   return hosts.length > 0 ? hosts : DEFAULT_PAY_URL_HOSTS;
 }
 
+/**
+ * Control characters inside a URL. `new URL()` strips tabs and newlines before
+ * parsing, so a hostile `https://jumbo.com/pay\nINJECTED` clears the host check
+ * while the raw string keeps its line break — which then lands in the forwarded
+ * message as a second line.
+ */
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
+
 export function isForwardablePayUrl(url: string | null | undefined): boolean {
   if (!url) return false;
+  if (CONTROL_CHARS_RE.test(url)) return false;
   let parsed: URL;
   try {
     parsed = new URL(url.trim());
