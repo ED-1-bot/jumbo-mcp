@@ -1,7 +1,13 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getValidAccessToken, refreshTokens } from "./auth.js";
+import {
+  CUSTOMER_ID_CLAIM,
+  decodeJwtPayload,
+  getValidAccessToken,
+  refreshTokens,
+} from "./auth.js";
+import { CacheStats, TtlCache, cacheKey, combineStats } from "./cache.js";
 import {
   LoyaltyProfile,
   ReceiptDetails,
@@ -30,6 +36,14 @@ import {
 import type { OrderPaymentInfo, PaymentLinkRecord } from "./payment.js";
 
 const GRAPHQL_URL = "https://www.jumbo.com/api/graphql";
+
+/**
+ * Jumbo's product search has one pagination knob — `ProductSearchInput.limit` —
+ * and serves at most 200 products per call (a larger limit is silently clamped
+ * server-side). There is no offset/cursor field, so a deep result set can only
+ * be reached by widening the window.
+ */
+const JUMBO_SEARCH_MAX_LIMIT = 200;
 
 /**
  * Raised when a shopping-list mutation returns the `ShoppingListError` union
@@ -88,9 +102,148 @@ export type ReceiptIdForm = "raw" | "stem" | "uuid" | "prefix";
 const RECEIPT_KEY_UUID_RE =
   /^(.+)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
+/**
+ * Single source of truth for `JUMBO_MCP_CACHE`. Read per operation so the flag
+ * applies to every cache in the process, including ones built before a change.
+ */
+const cachingEnabled = () => process.env.JUMBO_MCP_CACHE !== "off";
+
+/**
+ * City -> coordinates lookups are not customer-specific, so they live in a
+ * module-level cache. Nominatim asks for at most one request per second;
+ * caching keeps a repeated store search from hammering it.
+ */
+export const GEOCODE_CACHE_MAX_ENTRIES = 200;
+
+const geocodeCache = new TtlCache({
+  enabled: cachingEnabled,
+  maxEntries: GEOCODE_CACHE_MAX_ENTRIES,
+});
+
+/**
+ * Cache TTLs in milliseconds. Only immutable or slow-moving upstream data is
+ * cached — live customer state (profile, basket, shopping list, balance,
+ * stamps, receipt overview) is always fetched live.
+ */
+export const CACHE_TTL = {
+  /** Search results and promo prices: offers churn daily. */
+  search: 30 * 60 * 1000,
+  /** Product detail: a product's page is stable for a day. */
+  productDetail: 24 * 60 * 60 * 1000,
+  /** Store list, promotions and other near-static reference data. */
+  catalog: 24 * 60 * 60 * 1000,
+  /** Bonus folder, promotions and clearance-style markdowns. */
+  offers: 30 * 60 * 1000,
+  /** A closed receipt (and its deposit lines) is immutable; 30 days covers corrections. */
+  receiptDetail: 30 * 24 * 60 * 60 * 1000,
+  /** City -> coordinates geocoding: a city does not move. */
+  geocode: 24 * 60 * 60 * 1000,
+} as const;
+
+/**
+ * Allowlist by GraphQL operation. Anything not listed is fetched live, so a
+ * new operation is uncached until it is classified.
+ */
+const OPERATION_TTL: Record<string, number> = {
+  // Catalogue
+  GetStoreList: CACHE_TTL.catalog,
+  ProductDetail: CACHE_TTL.productDetail,
+  SearchProductsByKeyword: CACHE_TTL.search,
+  PromoDigestSearch: CACHE_TTL.search,
+  // Offers
+  getPromotions: CACHE_TTL.offers,
+  PromoDigestCustomerPromotions: CACHE_TTL.offers,
+  // Immutable per-record data
+  GetDigitalReceipt: CACHE_TTL.receiptDetail,
+  GetDeposits: CACHE_TTL.receiptDetail,
+  // Never cached (live customer state):
+  // GetProfile, GetReceiptOverview, GetBalance, GetShoppingList, GetStamps,
+  // ActiveBasket
+};
+
+const OPERATION_NAME_RE = /(?:query|mutation)\s+(\w+)/;
+
+/**
+ * Operations whose *successful* GraphQL payload can still carry a domain-level
+ * failure. Such a response must never be cached: a receipt that becomes
+ * resolvable later would stay hidden, and an error union would be replayed for
+ * the whole TTL. Mirrors the error conditions in the calling methods.
+ */
+const OPERATION_CACHE_PREDICATE: Record<string, (data: any) => boolean> = {
+  GetDigitalReceipt: (data) => Boolean(data?.receipt),
+  GetDeposits: (data) => {
+    // `returnedDeposits: null` means the deposit record is not available yet,
+    // not that the order returned nothing: caching it would hide deposits that
+    // appear later for the whole TTL.
+    if (!data?.returnedDeposits) return false;
+    const typename = data.returnedDeposits.__typename;
+    return !typename || typename === "ReturnedDepositsResponseSuccess";
+  },
+  // A product that the API cannot resolve stays retryable.
+  ProductDetail: (data) => Boolean(data?.product),
+};
+
 export class JumboClient {
   private userAgent =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+  private readonly cache: TtlCache;
+  private lastAuthScope: string | null = null;
+
+  constructor(cache?: TtlCache) {
+    this.cache =
+      cache ??
+      new TtlCache({
+        enabled: cachingEnabled,
+        maxEntries: Number(process.env.JUMBO_MCP_CACHE_MAX_ENTRIES ?? 500),
+      });
+  }
+
+  /**
+   * Counters for every cache the server runs: the GraphQL response cache plus
+   * the module-level geocode cache that backs `searchStores`. Reporting only the
+   * instance cache would hide geocode hits/misses from `jumbo_cache_stats`.
+   */
+  cacheStats(): CacheStats {
+    const stats = combineStats([this.cache.stats(), geocodeCache.stats()]);
+    return { ...stats, enabled: stats.enabled && cachingEnabled() };
+  }
+
+  /**
+   * Capacity of the GraphQL response cache alone: the value
+   * `JUMBO_MCP_CACHE_MAX_ENTRIES` configures. `cacheStats().maxEntries` sums both
+   * caches, so it is not the configured cap.
+   */
+  get responseCacheMaxEntries(): number {
+    return this.cache.stats().maxEntries;
+  }
+
+  /**
+   * Fingerprint of the credential snapshot the request will be sent with. It
+   * keeps a re-login (a new token file) from serving the previous account's
+   * cached data, and it clears the cache when the principal actually changes.
+   * The raw credential never appears in the key: only its digest does.
+   *
+   * The headers are passed in, not resolved here: the key and the request must
+   * describe the same credentials, or a re-login between the two could store
+   * account B's response under account A's key.
+   */
+  private authScope(headers: Record<string, string>): string {
+    // Scope on the account, not on the credential. A refreshed access token is a
+    // different string for the same customer, so hashing the header would drop
+    // the long-lived receipt and deposit entries on every refresh.
+    const bearer = headers.Authorization?.replace(/^Bearer\s+/i, "");
+    const customerId = bearer ? decodeJwtPayload(bearer)[CUSTOMER_ID_CLAIM] : undefined;
+    const material = customerId
+      ? `customer:${customerId}`
+      : headers.Authorization ?? headers.Cookie ?? "anonymous";
+    const scope = cacheKey("auth", [material]).split(" ").pop()!;
+    if (this.lastAuthScope !== null && this.lastAuthScope !== scope) {
+      this.cache.clear();
+    }
+    this.lastAuthScope = scope;
+    return scope;
+  }
 
   /** Last candidate form that resolved a receipt on `GetDigitalReceipt`. */
   private preferredReceiptIdForm: ReceiptIdForm | null = null;
@@ -131,6 +284,11 @@ export class JumboClient {
     );
   }
 
+  /**
+   * Cached entry point for every GraphQL call. Only operations on the
+   * allowlist are cached; everything else goes straight to the API, so live
+   * customer state is never served stale.
+   */
   async executeGraphql<T = any>(
     query: string,
     variables?: Record<string, any>,
@@ -138,7 +296,61 @@ export class JumboClient {
     retryOn401: boolean = true,
     accessTokenOverride?: string
   ): Promise<T> {
+    const operationName = OPERATION_NAME_RE.exec(query)?.[1] ?? "";
+    // The kill switch is checked here, not only when the cache is built: an
+    // injected TtlCache must not serve cached responses either.
+    const ttl = cachingEnabled() ? OPERATION_TTL[operationName] : undefined;
+
+    if (ttl === undefined) {
+      return await this.executeGraphqlRaw<T>(
+        query,
+        variables,
+        clientName,
+        retryOn401,
+        accessTokenOverride
+      );
+    }
+
     const authHeaders = await this.getAuthHeaders(accessTokenOverride);
+    const scope = this.authScope(authHeaders);
+    // The document text and the client name are part of the key: two
+    // different GraphQL documents can share an operation name and variables
+    // (e.g. `SearchProductsByKeyword` used for search and for recommendations)
+    // while requesting different fields.
+    const key = cacheKey(`POST ${GRAPHQL_URL} ${operationName}`, [
+      scope,
+      clientName,
+      query,
+      variables ?? {},
+    ]);
+    return await this.cache.wrap<T>(
+      key,
+      ttl,
+      () =>
+        this.executeGraphqlRaw<T>(
+          query,
+          variables,
+          clientName,
+          retryOn401,
+          accessTokenOverride,
+          authHeaders
+        ),
+      OPERATION_CACHE_PREDICATE[operationName]
+    );
+  }
+
+  private async executeGraphqlRaw<T = any>(
+    query: string,
+    variables?: Record<string, any>,
+    clientName: string = "JUMBO_WEB-loyalty",
+    retryOn401: boolean = true,
+    accessTokenOverride?: string,
+    authHeadersOverride?: Record<string, string>
+  ): Promise<T> {
+    // A caller that already resolved credentials (the cache path) passes them in
+    // so the request cannot drift onto a different principal than its cache key.
+    const authHeaders =
+      authHeadersOverride ?? (await this.getAuthHeaders(accessTokenOverride));
     const payload: { query: string; variables?: Record<string, any> } = { query };
     if (variables) payload.variables = variables;
 
@@ -168,7 +380,7 @@ export class JumboClient {
       // returned promise asynchronously, escapes this try/catch, and surfaces to
       // the caller as a raw transport error instead of an actionable one.
       const fresh = await refreshTokens();
-      return await this.executeGraphql<T>(
+      return await this.executeGraphqlRaw<T>(
         query,
         variables,
         clientName,
@@ -194,7 +406,7 @@ export class JumboClient {
         // Renew once, then replay with the NEW token explicitly. If this still
         // fails the session is genuinely dead -- say so, don't leak raw text.
         const fresh = await refreshTokens();
-        return await this.executeGraphql<T>(
+        return await this.executeGraphqlRaw<T>(
           query,
           variables,
           clientName,
@@ -1207,9 +1419,14 @@ export class JumboClient {
       input.sort = options.sort;
     }
 
+    const limit = Math.min(
+      Math.max(1, Math.trunc(options.limit ?? 25)),
+      JUMBO_SEARCH_MAX_LIMIT
+    );
+    input.limit = limit;
+
     const res = await this.executeGraphql<any>(q, { input }, "JUMBO_WEB-loyalty");
     const rawProducts = res?.searchProducts?.products || [];
-    const limit = options.limit ?? 25;
 
     const products: ProductSearchItem[] = rawProducts.slice(0, limit).map((p: any) => {
       const priceCents = p.price?.price ?? 0;
@@ -1232,9 +1449,14 @@ export class JumboClient {
       };
     });
 
+    const totalCount = res?.searchProducts?.count ?? products.length;
+
     return {
       query: options.query,
-      total_count: res?.searchProducts?.count ?? products.length,
+      total_count: totalCount,
+      // Jumbo has no offset/cursor, so a result set larger than the 200-product
+      // window can only be reported as partial — never silently as complete.
+      truncated: totalCount > products.length,
       products,
     };
   }
@@ -2165,15 +2387,26 @@ async function resolveCoordinates(
       };
     }
     try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ", Netherlands")}&format=json&limit=1`,
-        { headers: { "User-Agent": "jumbo-mcp/0.3.1" } }
-      );
-      if (res.ok) {
-        const data: any = await res.json();
-        if (Array.isArray(data) && data.length > 0 && data[0].lat && data[0].lon) {
-          return { lat: String(data[0].lat), lon: String(data[0].lon) };
+      const geoUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
+        query + ", Netherlands"
+      )}&format=json&limit=1`;
+      const data = await geocodeCache.wrap<any[]>(
+        cacheKey("GET https://nominatim.openstreetmap.org/search", [query]),
+        CACHE_TTL.geocode,
+        async () => {
+          const res = await fetch(geoUrl, {
+            headers: { "User-Agent": "jumbo-mcp/0.4.0" },
+          });
+          // A failed lookup must not be cached: an empty result would look
+          // like "no coordinates" and silently pin the fallback for 24 hours.
+          if (!res.ok) {
+            throw new Error(`Nominatim lookup failed (HTTP ${res.status})`);
+          }
+          return (await res.json()) as any[];
         }
+      );
+      if (Array.isArray(data) && data.length > 0 && data[0].lat && data[0].lon) {
+        return { lat: String(data[0].lat), lon: String(data[0].lon) };
       }
     } catch {
       // Fallback

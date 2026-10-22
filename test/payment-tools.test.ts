@@ -509,7 +509,7 @@ test("payments: JUMBO_MCP_PAYLINK=off removes the whole payment surface", async 
   try {
     await withServer(async (c) => {
       const { tools } = await c.listTools();
-      assert.equal(tools.length, 19, "the read-only toolset must stand on its own");
+      assert.equal(tools.length, 20, "the read-only toolset must stand on its own");
       assert.ok(!tools.some((t: any) => t.name.startsWith("jumbo_get_payment_link")));
       assert.ok(!tools.some((t: any) => t.name === "jumbo_payment_status"));
       await assert.rejects(() =>

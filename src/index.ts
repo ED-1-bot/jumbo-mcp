@@ -7,9 +7,12 @@ import * as dotenv from "dotenv";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { JumboClient, JumboShoppingListError } from "./client.js";
-import { buildEnvelope, parseLinkIdFromUrl, samePayUrl } from "./payment.js";
 import {
+  GEOCODE_CACHE_MAX_ENTRIES,
+  JumboClient,
+  JumboShoppingListError,
+} from "./client.js";
+import { buildEnvelope, parseLinkIdFromUrl, samePayUrl } from "./payment.js";import {
   decodeJwtPayload,
   getTokensFilePath,
   loadTokens,
@@ -73,6 +76,14 @@ async function showStatus(): Promise<void> {
   console.log("📋 JUMBO MCP STATUS");
   console.log("=" .repeat(60));
   console.log(`Token storage: ${getTokensFilePath()}`);
+
+  const cacheStats = client.cacheStats();
+  console.log(
+    `Response cache: ${cacheStats.enabled ? "enabled" : "disabled"} — ` +
+      `max ${client.responseCacheMaxEntries} entries, plus ` +
+      `${GEOCODE_CACHE_MAX_ENTRIES} for city geocoding. ` +
+      `Call jumbo_cache_stats for live hit/miss counters of the running server.`
+  );
 
   const hasRefresh = Boolean(tokens.refresh_token);
   console.log(`Refresh Token: ${hasRefresh ? "✅ Active (Permanent)" : "❌ Missing"}`);
@@ -185,7 +196,7 @@ async function resolvePaymentEnvelope(input: {
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "jumbo-mcp",
-    version: "0.3.1",
+    version: "0.4.0",
   });
 
   // Tool: Login (Agent auth verification)
@@ -438,9 +449,9 @@ export function createServer(): McpServer {
                 .number()
                 .int()
                 .min(1)
-                .max(30)
+                .max(200)
                 .default(20)
-                .describe("Maximum number of products to return (default: 20, max: 30)"),
+                .describe("Maximum number of products to return (default: 20, max: 200 — Jumbo serves at most 200 per search)"),
             }) }, async ({ query, sort, limit }) => {
               try {
                 const result = await client.searchProducts({ query, sort, limit });
@@ -677,6 +688,15 @@ export function createServer(): McpServer {
               }
             });
 
+  server.registerTool("jumbo_cache_stats", { title: "Get Jumbo Response Cache Statistics", description: "Report the in-process caches (GraphQL responses and store geocoding): enabled state, hits, misses, hit rate, stored entries and evictions. Use to verify that cached Jumbo responses are reused instead of re-fetched.", annotations: { readOnlyHint: true }, inputSchema: z.object({}) }, async () => {
+    try {
+      const stats = client.cacheStats();
+      return { content: [{ type: "text", text: JSON.stringify(stats, null, 2) }] };
+    } catch (error: any) {
+      return toolError(error);
+    }
+  });
+
   // ---------------------------------------------------------------- payments
   // The pay page is hosted by Jumbo/Adyen on Jumbo's own origin, with an
   // origin-restricted PSP client key, so this server can prepare and reconcile a
@@ -775,7 +795,6 @@ export function createServer(): McpServer {
       }
     );
   }
-
   return server;
 }
 
