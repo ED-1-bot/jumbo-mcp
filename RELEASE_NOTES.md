@@ -21,6 +21,11 @@
 * **Review Hardening**: Cache entries are scoped to the authenticated principal (a re-login can never read the previous account's cached data), a response that carries a domain-level failure (`receipt: null`, an error union) is never cached, a failed geocoding lookup is never cached, and an invalid size cap falls back to the default instead of silently disabling eviction.
 * **Kill Switch**: `JUMBO_MCP_CACHE=off` disables the cache entirely, `JUMBO_MCP_CACHE_MAX_ENTRIES` caps its size (default 500).
 * **README Disclosure**: A new *Caching & Data Freshness* section documents every TTL, what is never cached, and the staleness a caller can expect.
+
+### 2. Product Search Window & Truncation Indicator
+* **Upstream Search Limit**: `jumbo_search_products` now passes the requested `limit` directly to Jumbo's GraphQL input (`ProductSearchInput.limit`), supporting up to 200 products per request (increased from the previous slice ceiling).
+* **Truncation Indicator**: Added boolean `truncated` field to search results so callers know when total available products exceed the returned window.
+
 ---
 
 ## What's New in v0.3.1

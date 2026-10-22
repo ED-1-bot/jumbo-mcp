@@ -137,7 +137,7 @@ Run with `JUMBO_REFRESH_TOKEN`:
 | `jumbo_set_shopping_list_item_completed` | **Write.** Tick an item off or back on. | `item_id`, `completed` (both required) |
 | `jumbo_set_shopping_list_active` | **Write.** Activate or deactivate the list. | `active` (required) |
 | `jumbo_search_stores` | Nearby stores by city, address or coordinates: address, distance, hours. | `query`, `latitude`, `longitude` (all optional) |
-| `jumbo_search_products` | Search the catalog: prices, promotions, unit prices, links, SKUs. | `query` (required), `sort`, `limit` (`20`, max `30`) |
+| `jumbo_search_products` | Search the catalog: prices, promotions, unit prices, links, SKUs. | `query` (required), `sort`, `limit` (`20`, max `200`) |
 | `jumbo_get_product_recommendations` | Recommendations, alternatives, cross-sells, or weekly promotions. | `sku`, `query`, `promotions_only` (`false`) |
 | `jumbo_get_promo_digest` | What's on offer among the things you actually buy (read-only). | `days` (`90`), `min_times` (`2`), `limit` (`25`), `category` |
 | `jumbo_get_basket` | Current basket: lines, quantities, unit prices, promotions, subtotal. | None |
