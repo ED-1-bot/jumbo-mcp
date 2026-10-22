@@ -1,7 +1,7 @@
 # Jumbo MCP Server
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-0.3.1-green.svg)](https://modelcontextprotocol.io/)
+[![MCP](https://img.shields.io/badge/MCP-0.4.0-green.svg)](https://modelcontextprotocol.io/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 
 A Model Context Protocol (MCP) server for **Jumbo Supermarkten**.
@@ -144,6 +144,58 @@ Run with `JUMBO_REFRESH_TOKEN`:
 | `jumbo_get_deposits` | Statiegeld for one order: catalogue plus deposits returned. | `order_id` (required) |
 | `jumbo_get_statiegeld_summary` | Statiegeld totals: returned, charged, and net balance across receipts in a date range or year. | `year`, `start_date`, `end_date`, `max_receipts` (`50`) |
 | `jumbo_get_stamps` | Digital stamps, active saving (spaar) campaigns, buying-stamps balance. | None |
+| `jumbo_cache_stats` | Combined counters for the response and geocoding caches: enabled, hits, misses, hit rate, entries, evictions. | None |
+
+---
+
+## Caching & Data Freshness
+
+Jumbo's API cannot be cached at the HTTP layer, so this server keeps a
+**process-local TTL cache** in front of its single GraphQL choke point. It cuts
+request volume and speeds up repeat lookups — the promo digest alone resolves
+one receipt detail per receipt, plus a product lookup per basket term.
+
+**Scope:** in memory only, for the lifetime of the running MCP server process.
+Nothing is written to disk, no cache survives a restart, and entries are scoped
+to the signed-in account. No cached response contains your tokens — but a cached
+receipt detail does carry that receipt's account data (customer ID and loyalty
+card number), which is why it never leaves process memory.
+
+### What is cached, and for how long
+
+| Data | TTL | Why |
+| :--- | :---: | :--- |
+| Store list, city geocoding | 24 hours | A store's location does not move |
+| Product detail | 24 hours | A product's page is stable for a day |
+| Product search results, promo search | 30 minutes | Offer prices churn daily |
+| Promotions and customer promotions | 30 minutes | Weekly campaign, daily markdowns |
+| Closed receipt line items, order deposits | 30 days | A closed receipt is immutable |
+| Everything else | — | See below |
+
+### What is never cached
+
+Your profile, the receipt **overview** list, your shopping list, the basket,
+your Extra's balance and your stamps are **always fetched live**, never served
+from the cache. Those carry live personal state, and a stale read there would
+make the assistant re-add an item you just added.
+
+### What this means for you
+
+* **Prices and offers can be up to 30 minutes old**, and **product pages up to
+  24 hours old**. A price change during that window is not reflected.
+* **Caching is per process.** If your client spawns a fresh server for every
+  session, each session starts with a cold cache and the benefit is limited to
+  repeats within one session.
+* **Kill switch:** set `JUMBO_MCP_CACHE=off` to disable the cache entirely.
+  `JUMBO_MCP_CACHE_MAX_ENTRIES` caps the number of cached responses
+  (default 500).
+* **Verify it:** call `jumbo_cache_stats` for the live hit/miss counters of the
+  running server — they cover both the GraphQL response cache and the city
+  geocoding cache, so a store search that reused coordinates is visible. `npm run status` prints the cache *configuration* (enabled
+  state and size cap) — it starts a separate process, so it cannot show the
+  running server's counters.
+
+---
 
 ---
 

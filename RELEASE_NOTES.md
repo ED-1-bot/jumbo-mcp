@@ -1,5 +1,19 @@
 # Jumbo MCP Server Release Notes
 
+## What's New in v0.4.0
+
+### 1. Response Cache with a Documented Freshness Policy
+* **TTL Cache (`src/cache.ts`)**: An in-memory cache with LRU eviction, TTL expiry, namespace invalidation and single-flight coalescing, hooked into the single GraphQL choke point (`JumboClient.executeGraphql()`). Nothing about the cached calls changes for the caller.
+* **Allowlist by Operation**: Only classified GraphQL operations are cached — store list and city geocoding for 24 hours, product detail for 24 hours, product and promo search for 30 minutes, promotions and customer promotions for 30 minutes, and closed receipt line items plus order deposits for 30 days. Every other operation is fetched live.
+* **Never Cached**: The member profile, the receipt **overview** list, the shopping list, the basket, the Extra's balance and the stamps always go to the API, so a read-after-write can never serve stale personal state.
+* **No Cached Errors**: A failed or errored GraphQL response is never stored, and the 401-refresh replay stays inside the uncached path so a refreshed session cannot deadlock on its own in-flight cache entry.
+* **Observability**: New read-only tool `jumbo_cache_stats` reports hits, misses, hit rate, entries and evictions for every cache the server runs — the GraphQL response cache and the city geocoding cache alike. `npm run status` prints the cache *configuration* (enabled state and size cap) — it runs in its own process, so only the tool can report the running server's counters.
+* **Review Hardening**: Cache entries are scoped to the authenticated principal (a re-login can never read the previous account's cached data), a response that carries a domain-level failure (`receipt: null`, an error union) is never cached, a failed geocoding lookup is never cached, and an invalid size cap falls back to the default instead of silently disabling eviction.
+* **Kill Switch**: `JUMBO_MCP_CACHE=off` disables the cache entirely, `JUMBO_MCP_CACHE_MAX_ENTRIES` caps its size (default 500).
+* **README Disclosure**: A new *Caching & Data Freshness* section documents every TTL, what is never cached, and the staleness a caller can expect.
+
+---
+
 ## What's New in v0.3.1
 
 ### 1. Accurate Statiegeld (Deposit) Accounting on Receipts

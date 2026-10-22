@@ -7,7 +7,11 @@ import * as dotenv from "dotenv";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { JumboClient, JumboShoppingListError } from "./client.js";
+import {
+  GEOCODE_CACHE_MAX_ENTRIES,
+  JumboClient,
+  JumboShoppingListError,
+} from "./client.js";
 import {
   decodeJwtPayload,
   getTokensFilePath,
@@ -73,6 +77,14 @@ async function showStatus(): Promise<void> {
   console.log("=" .repeat(60));
   console.log(`Token storage: ${getTokensFilePath()}`);
 
+  const cacheStats = client.cacheStats();
+  console.log(
+    `Response cache: ${cacheStats.enabled ? "enabled" : "disabled"} — ` +
+      `max ${client.responseCacheMaxEntries} entries, plus ` +
+      `${GEOCODE_CACHE_MAX_ENTRIES} for city geocoding. ` +
+      `Call jumbo_cache_stats for live hit/miss counters of the running server.`
+  );
+
   const hasRefresh = Boolean(tokens.refresh_token);
   console.log(`Refresh Token: ${hasRefresh ? "✅ Active (Permanent)" : "❌ Missing"}`);
   console.log(`Last Saved:    ${tokens.saved_at || "Unknown"}`);
@@ -103,7 +115,7 @@ async function showStatus(): Promise<void> {
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "jumbo-mcp",
-    version: "0.3.1",
+    version: "0.4.0",
   });
 
   // Tool: Login (Agent auth verification)
@@ -594,6 +606,15 @@ export function createServer(): McpServer {
                 return toolError(error);
               }
             });
+
+  server.registerTool("jumbo_cache_stats", { title: "Get Jumbo Response Cache Statistics", description: "Report the in-process caches (GraphQL responses and store geocoding): enabled state, hits, misses, hit rate, stored entries and evictions. Use to verify that cached Jumbo responses are reused instead of re-fetched.", annotations: { readOnlyHint: true }, inputSchema: z.object({}) }, async () => {
+    try {
+      const stats = client.cacheStats();
+      return { content: [{ type: "text", text: JSON.stringify(stats, null, 2) }] };
+    } catch (error: any) {
+      return toolError(error);
+    }
+  });
 
   return server;
 }

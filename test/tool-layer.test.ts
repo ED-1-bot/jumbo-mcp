@@ -77,14 +77,15 @@ const EXPECTED_TOOLS = [
   "jumbo_get_statiegeld_summary",
   "jumbo_get_stamps",
   "jumbo_get_promo_digest",
+  "jumbo_cache_stats",
 ];
 
 // --------------------------------------------------------------------- tools/list
 
-test("tools/list exposes all 19 tools with the expected names", async () => {
+test("tools/list exposes all 20 tools with the expected names", async () => {
   await withServer(async (c) => {
     const { tools } = await c.listTools();
-    assert.equal(tools.length, 19);
+    assert.equal(tools.length, 20);
     assert.deepEqual(tools.map((t: any) => t.name).sort(), [...EXPECTED_TOOLS].sort());
   });
 });
