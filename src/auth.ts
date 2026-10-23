@@ -94,8 +94,14 @@ export function getProjectDir(): string {
   return process.cwd();
 }
 
+/**
+ * Env var naming the tokens file. Named here because every actionable error
+ * about token persistence has to point the operator at it.
+ */
+export const TOKENS_FILE_ENV_VAR = "JUMBO_TOKENS_FILE";
+
 export function getTokensFilePath(): string {
-  const envPath = process.env.JUMBO_TOKENS_FILE;
+  const envPath = process.env[TOKENS_FILE_ENV_VAR];
   if (envPath) return path.resolve(envPath.replace(/^~/, os.homedir()));
 
   // 1. Primary: tokens.json in project root
@@ -167,19 +173,68 @@ export function loadTokens(): TokensData | null {
   return null;
 }
 
+/**
+ * Persist the session. A failure here is never ignorable: Auth0 rotates the
+ * refresh token on every refresh, so a token that only exists in memory is
+ * lost at the next restart -- the process then re-reads the previous token,
+ * Auth0's reuse detection invalidates the entire family, and every tool call
+ * fails with `invalid_grant`. Fail loudly with the resolved path and the fix.
+ */
 export function saveTokens(tokens: TokensData): void {
+  const filePath = getTokensFilePath();
+
   try {
-    const filePath = getTokensFilePath();
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(tokens, null, 2), "utf-8");
-    try {
-      fs.chmodSync(filePath, 0o600);
-    } catch {
-      // Ignore permissions failure on Windows
-    }
-  } catch {
-    // Ignore if running in a read-only environment
+    fs.writeFileSync(filePath, JSON.stringify(tokens, null, 2), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+  } catch (error: any) {
+    // Node's fs errors already lead with their code ("EACCES: permission denied, mkdir …").
+    const reason = error?.message || error?.code || String(error);
+    throw new JumboAuthError(
+      "TOKENS_NOT_PERSISTED",
+      `Could not persist the Jumbo tokens to ${filePath} (${reason}). Auth0 rotates the refresh ` +
+        `token on every refresh, so the rotated token exists only in this process's memory now; ` +
+        `after a restart the previous token is replayed, Auth0's reuse detection invalidates the ` +
+        `whole token family, and every call fails with invalid_grant. Fix the cause above and set ` +
+        `${TOKENS_FILE_ENV_VAR} to a writable file on persistent storage (for a container: mount a ` +
+        `volume and use ${TOKENS_FILE_ENV_VAR}=/data/tokens.json).`
+    );
   }
+
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch (error: any) {
+    // The token is durable at this point, so this is a confidentiality problem,
+    // not a persistence one -- warn loudly instead of failing a good refresh.
+    console.error(
+      `[jumbo-mcp] WARNING: tokens were written to ${filePath} but chmod 600 failed ` +
+        `(${error?.code || error?.message || error}). The refresh token may be readable by other ` +
+        `accounts on this host; restrict the file's permissions or point ${TOKENS_FILE_ENV_VAR} at ` +
+        `a private path.`
+    );
+  }
+}
+
+/**
+ * Refresh-token precedence, in one place: a refresh token stored on disk always
+ * wins over `JUMBO_REFRESH_TOKEN`. Rotation is enabled on Jumbo's Auth0 tenant,
+ * so after the first refresh the file holds the only live token; replaying the
+ * env value would hand Auth0 an already-used token and kill the family. The env
+ * var is a bootstrap value only -- read when no stored token exists at all.
+ */
+export function resolveRefreshToken(tokens: TokensData | null): {
+  token: string | null;
+  source: "file" | "env" | null;
+} {
+  const stored = tokens?.refresh_token?.trim();
+  if (stored) return { token: stored, source: "file" };
+
+  const fromEnv = process.env.JUMBO_REFRESH_TOKEN?.trim();
+  if (fromEnv) return { token: fromEnv, source: "env" };
+
+  return { token: null, source: null };
 }
 
 export function buildAuthorizeUrl(
@@ -419,16 +474,55 @@ export async function exchangeCode(
   return tokens;
 }
 
+/**
+ * Turn an Auth0 rejection into an operator diagnosis. A rotated-away refresh
+ * token is a permanent condition (reuse detection has already invalidated the
+ * family), so the message must say that no retry can help and name the exact
+ * remediation: re-login, new env bootstrap value, and a persistent tokens file.
+ */
+function describeRefreshFailure(status: number, errText: string): Error {
+  let error: string | undefined;
+  let description: string | undefined;
+  try {
+    const parsed = JSON.parse(errText);
+    if (typeof parsed?.error === "string") error = parsed.error;
+    if (typeof parsed?.error_description === "string") description = parsed.error_description;
+  } catch {
+    // Non-JSON body: the raw text is all we have.
+  }
+
+  if (error === "invalid_grant" || /invalid_grant|Unknown or invalid refresh token/i.test(errText)) {
+    const detail = (description || errText).replace(/[\s.]+$/, "");
+    return new JumboAuthError(
+      "REFRESH_TOKEN_REJECTED",
+      `Auth0 token refresh failed (${status}, invalid_grant): ${detail}. The stored Jumbo refresh ` +
+        `token is dead: Jumbo's Auth0 tenant rotates refresh tokens and detects reuse, so once a ` +
+        `rotated token is not persisted (or the env token is replayed after a restart) the whole ` +
+        `token family is invalidated and no retry can recover it. Tokens path: ` +
+        `${getTokensFilePath()}. Operator action: run 'jumbo-mcp login' again, set ` +
+        `JUMBO_REFRESH_TOKEN from that login (bootstrap value only), and for a container set ` +
+        `${TOKENS_FILE_ENV_VAR} to a writable path on a persistent volume ` +
+        `(for example ${TOKENS_FILE_ENV_VAR}=/data/tokens.json) so the rotated token survives a restart.`
+    );
+  }
+
+  return new JumboAuthError(
+    "REFRESH_FAILED",
+    `Auth0 token refresh failed (${status}): ${errText} (tokens path: ${getTokensFilePath()})`
+  );
+}
+
 export async function refreshTokens(existing?: TokensData): Promise<TokensData> {
   const tokens = existing || loadTokens();
-  const rToken = tokens?.refresh_token || process.env.JUMBO_REFRESH_TOKEN;
+  const { token: rToken } = resolveRefreshToken(tokens);
 
   if (!rToken) {
     throw new JumboAuthError(
       "MISSING_REFRESH_TOKEN",
-      "No Jumbo refresh_token is available, so the session cannot be renewed. Run " +
-        "'jumbo-mcp login' to re-authenticate, and set JUMBO_REFRESH_TOKEN from that " +
-        "login for headless deployments."
+      `No Jumbo refresh_token is available (nothing usable in ${getTokensFilePath()} and no ` +
+        `JUMBO_REFRESH_TOKEN is set), so the session cannot be renewed. Run 'jumbo-mcp login' ` +
+        `to re-authenticate; for a container, persist the tokens file on a mounted volume via ` +
+        `${TOKENS_FILE_ENV_VAR} instead of relying on the env bootstrap value alone.`
     );
   }
 
@@ -461,7 +555,7 @@ export async function refreshTokens(existing?: TokensData): Promise<TokensData> 
 
   if (!resp.ok) {
     const errText = await resp.text();
-    throw new Error(`Auth0 token refresh failed (${resp.status}): ${errText}`);
+    throw describeRefreshFailure(resp.status, errText);
   }
 
   const fresh = (await resp.json()) as Partial<TokensData>;
@@ -498,7 +592,7 @@ export async function getValidAccessToken(
 
   const tokens = loadTokens();
   let accessToken = tokens?.access_token;
-  const refreshToken = tokens?.refresh_token || process.env.JUMBO_REFRESH_TOKEN;
+  const { token: refreshToken } = resolveRefreshToken(tokens);
 
   if (!accessToken && !refreshToken) return null;
 
