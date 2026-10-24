@@ -174,6 +174,7 @@ export interface TokenStore {
   load(): TokensData | null | Promise<TokensData | null>;
   save(tokens: TokensData): void | Promise<void>;
   assertWritable?(): void | Promise<void>;
+  withLock?<T>(fn: (ctx: { waited: boolean }) => Promise<T>): Promise<T>;
 }
 
 export class FileTokenStore implements TokenStore {
@@ -262,10 +263,137 @@ export class FileTokenStore implements TokenStore {
       );
     }
   }
+
+  getLockFilePath(): string {
+    const filePath = this.getFilePath();
+    const dir = path.dirname(filePath);
+    const base = path.basename(filePath);
+    return path.join(dir, `.${base}.lock`);
+  }
+
+  /**
+   * Acquire an advisory lock on the token file to prevent concurrent processes
+   * from simultaneously refreshing and triggering Auth0 token-reuse revocation.
+   */
+  async acquireLock(
+    timeoutMs = 15000,
+    staleMs = 10000
+  ): Promise<{ release: () => void; waited: boolean }> {
+    const lockPath = this.getLockFilePath();
+    const dir = path.dirname(lockPath);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch {
+      // Ignore directory creation failure
+    }
+
+    const start = Date.now();
+    let waited = false;
+
+    while (true) {
+      try {
+        const fd = fs.openSync(
+          lockPath,
+          fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY,
+          0o600
+        );
+        try {
+          fs.writeFileSync(
+            fd,
+            JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+            "utf-8"
+          );
+        } finally {
+          fs.closeSync(fd);
+        }
+
+        return {
+          release: () => {
+            try {
+              if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+            } catch {
+              // Ignore lockfile removal failure
+            }
+          },
+          waited,
+        };
+      } catch (err: any) {
+        if (err?.code !== "EEXIST") {
+          // If filesystem does not support atomic O_EXCL or directory is read-only,
+          // warn and proceed without locking rather than crashing.
+          console.warn(
+            `[jumbo-mcp] WARNING: Could not acquire file lock at ${lockPath}: ${err.message}`
+          );
+          return { release: () => {}, waited: false };
+        }
+        waited = true;
+
+        // Lock file exists: check if it's stale (orphaned by a dead process)
+        try {
+          const content = fs.readFileSync(lockPath, "utf-8");
+          const info = JSON.parse(content);
+          const age = Date.now() - (info.createdAt || 0);
+
+          let isDead = false;
+          if (info.pid && typeof info.pid === "number" && process.platform !== "win32") {
+            try {
+              process.kill(info.pid, 0);
+            } catch (killErr: any) {
+              if (killErr?.code === "ESRCH") {
+                isDead = true;
+              }
+            }
+          }
+
+          if (age > staleMs || isDead) {
+            try {
+              fs.unlinkSync(lockPath);
+              continue; // Retry lock acquisition immediately
+            } catch {
+              // Ignore race on unlink
+            }
+          }
+        } catch {
+          try {
+            const stat = fs.statSync(lockPath);
+            if (Date.now() - stat.mtimeMs > 5000) {
+              fs.unlinkSync(lockPath);
+              continue;
+            }
+          } catch {
+            // Ignore
+          }
+        }
+
+        if (Date.now() - start > timeoutMs) {
+          throw new JumboAuthError(
+            "LOCK_TIMEOUT",
+            `Timed out waiting for Jumbo token file lock at ${lockPath}. ` +
+              `Another process may be refreshing the token or died unexpectedly.`
+          );
+        }
+
+        // Wait with jitter between 40ms and 80ms before retrying
+        await new Promise((r) => setTimeout(r, 40 + Math.random() * 40));
+      }
+    }
+  }
+
+  async withLock<T>(fn: (ctx: { waited: boolean }) => Promise<T>): Promise<T> {
+    const { release, waited } = await this.acquireLock();
+    try {
+      return await fn({ waited });
+    } finally {
+      release();
+    }
+  }
 }
 
 export class MemoryTokenStore implements TokenStore {
   private tokens: TokensData | null = null;
+  private lockPromise: Promise<void> = Promise.resolve();
+  private pendingLocks = 0;
+
   constructor(initialTokens?: TokensData | null) {
     this.tokens = initialTokens ?? null;
   }
@@ -276,6 +404,24 @@ export class MemoryTokenStore implements TokenStore {
     this.tokens = tokens;
   }
   assertWritable(): void {}
+
+  async withLock<T>(fn: (ctx: { waited: boolean }) => Promise<T>): Promise<T> {
+    const waited = this.pendingLocks > 0;
+    this.pendingLocks++;
+    let release: () => void;
+    const nextLock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prevLock = this.lockPromise;
+    this.lockPromise = nextLock;
+    await prevLock;
+    try {
+      return await fn({ waited });
+    } finally {
+      this.pendingLocks--;
+      release!();
+    }
+  }
 }
 
 export class HttpTokenStore implements TokenStore {
@@ -649,71 +795,97 @@ function describeRefreshFailure(status: number, errText: string): Error {
 }
 
 export async function refreshTokens(existing?: TokensData): Promise<TokensData> {
-  const tokens = existing || (await loadTokens());
-  const { token: rToken } = resolveRefreshToken(tokens);
+  const store = getTokenStore();
+  const initialTokens = existing || (await loadTokens());
+  const initialRefreshToken = initialTokens?.refresh_token;
+  const initialSavedAt = initialTokens?.saved_at;
 
-  if (!rToken) {
-    throw new JumboAuthError(
-      "MISSING_REFRESH_TOKEN",
-      `No Jumbo refresh_token is available (nothing usable in ${getTokensFilePath()} and no ` +
-        `JUMBO_REFRESH_TOKEN is set), so the session cannot be renewed. Run 'jumbo-mcp login' ` +
-        `to re-authenticate; for a container, persist the tokens file on a mounted volume via ` +
-        `${TOKENS_FILE_ENV_VAR} instead of relying on the env bootstrap value alone.`
-    );
-  }
+  const doRefresh = async (ctx?: { waited?: boolean }): Promise<TokensData> => {
+    const tokens = (await loadTokens()) || initialTokens || null;
+    const { token: rToken } = resolveRefreshToken(tokens);
 
-  await assertTokensPathWritable();
+    // Coalesce concurrent refreshes: if another process or thread refreshed the token
+    // while we waited for the lock, reuse the fresh token rather than hitting Auth0 twice
+    // (which would trigger reuse detection).
+    if (ctx?.waited) {
+      const tokenChanged = Boolean(
+        tokens &&
+          ((initialRefreshToken && tokens.refresh_token !== initialRefreshToken) ||
+            (initialSavedAt && tokens.saved_at !== initialSavedAt))
+      );
+      if (tokenChanged && tokens?.access_token) {
+        return tokens;
+      }
+    }
 
-  const domain = tokens?.domain || AUTH_CONFIG.domain;
-  const clientId = tokens?.client_id || AUTH_CONFIG.client_id;
-  const tokenUrl = `https://${domain}/oauth/token`;
+    if (!rToken) {
+      throw new JumboAuthError(
+        "MISSING_REFRESH_TOKEN",
+        `No Jumbo refresh_token is available (nothing usable in ${getTokensFilePath()} and no ` +
+          `JUMBO_REFRESH_TOKEN is set), so the session cannot be renewed. Run 'jumbo-mcp login' ` +
+          `to re-authenticate; for a container, persist the tokens file on a mounted volume via ` +
+          `${TOKENS_FILE_ENV_VAR} instead of relying on the env bootstrap value alone.`
+      );
+    }
 
-  // `audience` and `scope` are REQUIRED here. Auth0 mints the refreshed access
-  // token for the client's default audience when `audience` is omitted, and the
-  // 'https://jumbo.com/customerId' claim is only attached to the Jumbo web API
-  // audience -- so an audience-less refresh returns a token Jumbo rejects with
-  // "Customer ID cannot be null or empty". (auth0-spa-js spreads the stored
-  // authorization params, including audience + scope, into this grant.)
-  const payload = {
-    grant_type: "refresh_token",
-    client_id: clientId,
-    refresh_token: rToken,
-    audience: AUTH_CONFIG.audience,
-    scope: DEFAULT_SCOPE,
+    await assertTokensPathWritable();
+
+    const domain = tokens?.domain || AUTH_CONFIG.domain;
+    const clientId = tokens?.client_id || AUTH_CONFIG.client_id;
+    const tokenUrl = `https://${domain}/oauth/token`;
+
+    // `audience` and `scope` are REQUIRED here. Auth0 mints the refreshed access
+    // token for the client's default audience when `audience` is omitted, and the
+    // 'https://jumbo.com/customerId' claim is only attached to the Jumbo web API
+    // audience -- so an audience-less refresh returns a token Jumbo rejects with
+    // "Customer ID cannot be null or empty". (auth0-spa-js spreads the stored
+    // authorization params, including audience + scope, into this grant.)
+    const payload = {
+      grant_type: "refresh_token",
+      client_id: clientId,
+      refresh_token: rToken,
+      audience: AUTH_CONFIG.audience,
+      scope: DEFAULT_SCOPE,
+    };
+
+    const resp = await authFetch(tokenUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw describeRefreshFailure(resp.status, errText);
+    }
+
+    const fresh = (await resp.json()) as Partial<TokensData>;
+
+    // Validate before persisting: never overwrite a good session with a token
+    // Jumbo will reject.
+    assertUsableAccessToken(fresh.access_token || "");
+
+    const merged: TokensData = {
+      ...(tokens || {}),
+      ...fresh,
+      refresh_token: fresh.refresh_token || rToken || tokens?.refresh_token,
+      access_token: fresh.access_token || tokens?.access_token || "",
+      saved_at: new Date().toISOString(),
+      domain,
+      client_id: clientId,
+    };
+
+    await saveTokens(merged);
+    return merged;
   };
 
-  const resp = await authFetch(tokenUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw describeRefreshFailure(resp.status, errText);
+  if (store.withLock) {
+    return await store.withLock(doRefresh);
   }
-
-  const fresh = (await resp.json()) as Partial<TokensData>;
-
-  // Validate before persisting: never overwrite a good session with a token
-  // Jumbo will reject.
-  assertUsableAccessToken(fresh.access_token || "");
-
-  const merged: TokensData = {
-    ...(tokens || {}),
-    ...fresh,
-    refresh_token: fresh.refresh_token || rToken || tokens?.refresh_token,
-    access_token: fresh.access_token || tokens?.access_token || "",
-    saved_at: new Date().toISOString(),
-    domain,
-    client_id: clientId,
-  };
-
-  await saveTokens(merged);
-  return merged;
+  return await doRefresh();
 }
 
 export async function getValidAccessToken(

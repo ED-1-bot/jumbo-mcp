@@ -306,3 +306,43 @@ test("custom TokenStore can be plugged in and receives rotated tokens", async ()
     setTokenStore(null); // restore default FileTokenStore
   }
 });
+
+test("concurrent refreshTokens calls are serialized and coalesced via lock", async () => {
+  seed({
+    refresh_token: "concurrent-rt-1",
+    saved_at: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
+  });
+
+  let refreshCalls = 0;
+  installFetch(async () => {
+    refreshCalls++;
+    await new Promise((r) => setTimeout(r, 60)); // simulate network delay
+    return json({ access_token: GOOD_TOKEN, expires_in: 86400, refresh_token: "concurrent-rt-2" });
+  });
+
+  // Launch two refreshes concurrently
+  const [res1, res2] = await Promise.all([refreshTokens(), refreshTokens()]);
+
+  assert.equal(res1.refresh_token, "concurrent-rt-2");
+  assert.equal(res2.refresh_token, "concurrent-rt-2");
+  assert.equal(refreshCalls, 1, "concurrent refreshes must coalesce into a single Auth0 request via lock");
+});
+
+test("stale lock file is broken and recovered", async () => {
+  const store = getTokenStore() as any;
+  const lockPath = store.getLockFilePath();
+
+  // Create an artificial stale lockfile from an old timestamp
+  fs.writeFileSync(
+    lockPath,
+    JSON.stringify({ pid: 999999, createdAt: Date.now() - 20000 }),
+    "utf-8"
+  );
+
+  seed({ refresh_token: "stale-rt-1" });
+  installFetch(() => json({ access_token: GOOD_TOKEN, expires_in: 86400, refresh_token: "stale-rt-2" }));
+
+  const refreshed = await refreshTokens();
+  assert.equal(refreshed.refresh_token, "stale-rt-2");
+  assert.equal(fs.existsSync(lockPath), false, "lock must be cleanly released after recovery");
+});
