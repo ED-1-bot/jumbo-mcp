@@ -22,7 +22,9 @@ import * as path from "node:path";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "jumbo-auth-persist-"));
 const tokensFile = path.join(tmpDir, "tokens.json");
-const unwritableFile = "/nonexistent/jumbo-mcp/tokens.json";
+const blocker = path.join(tmpDir, "blocker");
+fs.writeFileSync(blocker, "not a directory");
+const unwritableFile = path.join(blocker, "jumbo-mcp", "tokens.json");
 
 process.env.JUMBO_TOKENS_FILE = tokensFile;
 delete process.env.JUMBO_TOKEN;
@@ -32,6 +34,7 @@ const {
   AUTH_CONFIG,
   CUSTOMER_ID_CLAIM,
   JumboAuthError,
+  assertTokensPathWritable,
   getTokensFilePath,
   loadTokens,
   refreshTokens,
@@ -194,6 +197,7 @@ test("an unwritable tokens path fails loudly instead of continuing in memory", a
         err.message.includes(unwritableFile) &&
         err.message.includes("JUMBO_TOKENS_FILE")
     );
+    assert.equal(calls.length, 0, "preflight must not call Auth0 when tokens path is unwritable");
     assert.equal(fs.existsSync(unwritableFile), false);
   } finally {
     delete process.env.JUMBO_REFRESH_TOKEN;
@@ -254,4 +258,27 @@ test("a transient refresh failure is reported without the rotation diagnosis", a
       /token refresh failed/.test(err.message) &&
       !/invalid_grant/.test(err.message)
   );
+});
+
+test("loadTokens handles corrupted/truncated JSON without throwing", () => {
+  fs.writeFileSync(tokensFile, "{ truncated json", "utf-8");
+  assert.equal(loadTokens(), null);
+});
+
+test("assertTokensPathWritable throws TOKENS_NOT_PERSISTED when path is unwritable", () => {
+  const previous = process.env.JUMBO_TOKENS_FILE;
+  process.env.JUMBO_TOKENS_FILE = unwritableFile;
+
+  try {
+    assert.throws(
+      () => assertTokensPathWritable(),
+      (err: any) =>
+        err instanceof JumboAuthError &&
+        err.code === "TOKENS_NOT_PERSISTED" &&
+        err.message.includes(unwritableFile) &&
+        err.message.includes("JUMBO_TOKENS_FILE")
+    );
+  } finally {
+    process.env.JUMBO_TOKENS_FILE = previous;
+  }
 });

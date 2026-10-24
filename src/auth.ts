@@ -112,11 +112,15 @@ export function getTokensFilePath(): string {
   const cwdFile = path.resolve(process.cwd(), "tokens.json");
   if (fs.existsSync(cwdFile)) return cwdFile;
 
-  // 3. Fallback to global config (~/.config/jumbo-mcp/tokens.json) if it exists
+  // 3. Fallback to container data dir (/data/tokens.json) if it exists
+  const containerData = "/data/tokens.json";
+  if (fs.existsSync(containerData)) return containerData;
+
+  // 4. Fallback to global config (~/.config/jumbo-mcp/tokens.json) if it exists
   const globalConfig = path.join(os.homedir(), ".config", "jumbo-mcp", "tokens.json");
   if (fs.existsSync(globalConfig)) return globalConfig;
 
-  // 4. Fallback to legacy path if present
+  // 5. Fallback to legacy path if present
   const legacy = path.join(os.homedir(), ".gemini", "config", "jumbo-mcp", "tokens.json");
   if (fs.existsSync(legacy)) return legacy;
 
@@ -166,11 +170,43 @@ export function loadTokens(): TokensData | null {
     try {
       const content = fs.readFileSync(filePath, "utf-8");
       return JSON.parse(content);
-    } catch {
+    } catch (error: any) {
+      console.error(
+        `[jumbo-mcp] WARNING: tokens file exists at ${filePath} but could not be read/parsed ` +
+          `(${error?.message || error}). Ignoring corrupted tokens file.`
+      );
       return null;
     }
   }
   return null;
+}
+
+/**
+ * Preflight that the tokens file can be written before contacting Auth0.
+ *
+ * If the path or volume is unwritable, failing before `POST /oauth/token` keeps
+ * the existing refresh token alive upstream. If we refresh first and fail to
+ * persist the rotated token, the token family is permanently lost on restart.
+ */
+export function assertTokensPathWritable(): void {
+  const filePath = getTokensFilePath();
+  try {
+    const dir = path.dirname(filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.accessSync(
+      fs.existsSync(filePath) ? filePath : dir,
+      fs.constants.W_OK
+    );
+  } catch (error: any) {
+    const reason = error?.message || error?.code || String(error);
+    throw new JumboAuthError(
+      "TOKENS_NOT_PERSISTED",
+      `Could not verify that the Jumbo tokens can be persisted to ${filePath} before refresh (${reason}). ` +
+        `Auth0 rotates the refresh token on every refresh; refreshing now would consume the live token ` +
+        `without saving the replacement. Fix the cause above and set ${TOKENS_FILE_ENV_VAR} to a writable ` +
+        `file on persistent storage (for a container: mount a volume and use ${TOKENS_FILE_ENV_VAR}=/data/tokens.json).`
+    );
+  }
 }
 
 /**
@@ -179,27 +215,41 @@ export function loadTokens(): TokensData | null {
  * lost at the next restart -- the process then re-reads the previous token,
  * Auth0's reuse detection invalidates the entire family, and every tool call
  * fails with `invalid_grant`. Fail loudly with the resolved path and the fix.
+ *
+ * Writes are performed atomically (write to temp file then rename) to prevent
+ * partial or corrupt writes if the process is terminated mid-flight.
  */
 export function saveTokens(tokens: TokensData): void {
   const filePath = getTokensFilePath();
+  const dir = path.dirname(filePath);
+  const tempPath = path.join(
+    dir,
+    `.tokens.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
+  );
 
   try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(tokens, null, 2), {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(tempPath, JSON.stringify(tokens, null, 2), {
       encoding: "utf-8",
       mode: 0o600,
     });
+    fs.renameSync(tempPath, filePath);
   } catch (error: any) {
+    try {
+      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    } catch {
+      // Ignore temp file cleanup error
+    }
     // Node's fs errors already lead with their code ("EACCES: permission denied, mkdir …").
     const reason = error?.message || error?.code || String(error);
     throw new JumboAuthError(
       "TOKENS_NOT_PERSISTED",
       `Could not persist the Jumbo tokens to ${filePath} (${reason}). Auth0 rotates the refresh ` +
-        `token on every refresh, so the rotated token exists only in this process's memory now; ` +
-        `after a restart the previous token is replayed, Auth0's reuse detection invalidates the ` +
-        `whole token family, and every call fails with invalid_grant. Fix the cause above and set ` +
-        `${TOKENS_FILE_ENV_VAR} to a writable file on persistent storage (for a container: mount a ` +
-        `volume and use ${TOKENS_FILE_ENV_VAR}=/data/tokens.json).`
+        `token on every refresh, so the rotated token was not persisted and is unavailable to ` +
+        `subsequent refresh attempts. If the previous token is replayed, Auth0's reuse detection ` +
+        `invalidates the whole token family, and every call fails with invalid_grant. Fix the cause ` +
+        `above and set ${TOKENS_FILE_ENV_VAR} to a writable file on persistent storage (for a container: ` +
+        `mount a volume and use ${TOKENS_FILE_ENV_VAR}=/data/tokens.json).`
     );
   }
 
@@ -526,6 +576,8 @@ export async function refreshTokens(existing?: TokensData): Promise<TokensData> 
     );
   }
 
+  assertTokensPathWritable();
+
   const domain = tokens?.domain || AUTH_CONFIG.domain;
   const clientId = tokens?.client_id || AUTH_CONFIG.client_id;
   const tokenUrl = `https://${domain}/oauth/token`;
@@ -567,6 +619,7 @@ export async function refreshTokens(existing?: TokensData): Promise<TokensData> 
   const merged: TokensData = {
     ...(tokens || {}),
     ...fresh,
+    refresh_token: fresh.refresh_token || rToken || tokens?.refresh_token,
     access_token: fresh.access_token || tokens?.access_token || "",
     saved_at: new Date().toISOString(),
     domain,
