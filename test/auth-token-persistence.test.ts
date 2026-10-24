@@ -335,7 +335,7 @@ test("stale lock file is broken and recovered", async () => {
   // Create an artificial stale lockfile from an old timestamp
   fs.writeFileSync(
     lockPath,
-    JSON.stringify({ pid: 999999, createdAt: Date.now() - 20000 }),
+    JSON.stringify({ pid: 999999, host: "other-host", createdAt: Date.now() - 25000 }),
     "utf-8"
   );
 
@@ -345,4 +345,39 @@ test("stale lock file is broken and recovered", async () => {
   const refreshed = await refreshTokens();
   assert.equal(refreshed.refresh_token, "stale-rt-2");
   assert.equal(fs.existsSync(lockPath), false, "lock must be cleanly released after recovery");
+});
+
+test("concurrent refreshes with a lockless store coalesce in-process via single-flight", async () => {
+  let storedTokens: any = {
+    access_token: "lockless-old",
+    refresh_token: "lockless-rt-1",
+    domain: AUTH_CONFIG.domain,
+    client_id: AUTH_CONFIG.client_id,
+  };
+
+  // Custom lockless store (like HttpTokenStore) without withLock
+  const locklessStore = {
+    load: () => storedTokens,
+    save: (t: any) => {
+      storedTokens = t;
+    },
+  };
+
+  setTokenStore(locklessStore);
+
+  let fetchCalls = 0;
+  installFetch(async () => {
+    fetchCalls++;
+    await new Promise((r) => setTimeout(r, 50));
+    return json({ access_token: GOOD_TOKEN, expires_in: 86400, refresh_token: "lockless-rt-2" });
+  });
+
+  try {
+    const [t1, t2] = await Promise.all([refreshTokens(), refreshTokens()]);
+    assert.equal(t1.refresh_token, "lockless-rt-2");
+    assert.equal(t2.refresh_token, "lockless-rt-2");
+    assert.equal(fetchCalls, 1, "lockless store must coalesce in-flight calls inside the same process");
+  } finally {
+    setTokenStore(null);
+  }
 });

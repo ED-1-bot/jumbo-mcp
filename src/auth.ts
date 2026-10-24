@@ -289,6 +289,8 @@ export class FileTokenStore implements TokenStore {
 
     const start = Date.now();
     let waited = false;
+    const owner = crypto.randomUUID();
+    const host = os.hostname();
 
     while (true) {
       try {
@@ -300,7 +302,7 @@ export class FileTokenStore implements TokenStore {
         try {
           fs.writeFileSync(
             fd,
-            JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+            JSON.stringify({ pid: process.pid, host, owner, createdAt: Date.now() }),
             "utf-8"
           );
         } finally {
@@ -310,7 +312,12 @@ export class FileTokenStore implements TokenStore {
         return {
           release: () => {
             try {
-              if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+              if (fs.existsSync(lockPath)) {
+                const cur = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+                if (cur?.owner === owner) {
+                  fs.unlinkSync(lockPath);
+                }
+              }
             } catch {
               // Ignore lockfile removal failure
             }
@@ -334,8 +341,9 @@ export class FileTokenStore implements TokenStore {
           const info = JSON.parse(content);
           const age = Date.now() - (info.createdAt || 0);
 
+          const sameHost = !info.host || info.host === host;
           let isDead = false;
-          if (info.pid && typeof info.pid === "number" && process.platform !== "win32") {
+          if (sameHost && typeof info.pid === "number" && process.platform !== "win32") {
             try {
               process.kill(info.pid, 0);
             } catch (killErr: any) {
@@ -345,7 +353,7 @@ export class FileTokenStore implements TokenStore {
             }
           }
 
-          if (age > staleMs || isDead) {
+          if (isDead || (!sameHost && age > staleMs) || age > staleMs * 2) {
             try {
               fs.unlinkSync(lockPath);
               continue; // Retry lock acquisition immediately
@@ -568,7 +576,7 @@ export function buildAuthorizeUrl(
  */
 async function authFetch(
   urlStr: string,
-  options: { method: string; headers: Record<string, string>; body?: string }
+  options: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }
 ): Promise<{ ok: boolean; status: number; text: () => Promise<string>; json: () => Promise<any> }> {
   let lastErr: any = null;
 
@@ -604,6 +612,7 @@ async function authFetch(
           method: options.method || "POST",
           headers: reqHeaders,
           agent,
+          signal: options.signal,
         },
         (res) => {
           const chunks: Buffer[] = [];
@@ -794,6 +803,8 @@ function describeRefreshFailure(status: number, errText: string): Error {
   );
 }
 
+let inflightRefresh: Promise<TokensData> | null = null;
+
 export async function refreshTokens(existing?: TokensData): Promise<TokensData> {
   const store = getTokenStore();
   const initialTokens = existing || (await loadTokens());
@@ -855,6 +866,7 @@ export async function refreshTokens(existing?: TokensData): Promise<TokensData> 
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
       },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(8000),
     });
 
     if (!resp.ok) {
@@ -885,7 +897,13 @@ export async function refreshTokens(existing?: TokensData): Promise<TokensData> 
   if (store.withLock) {
     return await store.withLock(doRefresh);
   }
-  return await doRefresh();
+
+  if (!inflightRefresh) {
+    inflightRefresh = doRefresh().finally(() => {
+      inflightRefresh = null;
+    });
+  }
+  return await inflightRefresh;
 }
 
 export async function getValidAccessToken(
