@@ -284,7 +284,7 @@ export async function authFetch(
       if (options.body) {
         args.push("-d", options.body);
       }
-      execFile("curl", args, (err, stdout, stderr) => {
+      execFile("curl", args, { signal: options.signal }, (err, stdout, stderr) => {
         if (err) {
           return reject(new Error(`curl failed: ${err.message} (${stderr})`));
         }
