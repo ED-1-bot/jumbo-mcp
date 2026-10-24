@@ -412,6 +412,29 @@ test("authFetch abort stops fallback chain without replaying via https or curl",
   }
 });
 
+test("authFetch stops before https fallback if signal aborts during fetch attempt", async () => {
+  const controller = new AbortController();
+  const originalFetch = globalThis.fetch;
+  (globalThis as any).fetch = async () => {
+    controller.abort();
+    throw new Error("transient socket error");
+  };
+
+  try {
+    await assert.rejects(
+      () =>
+        authFetch("https://example.com/oauth/token", {
+          method: "POST",
+          headers: {},
+          signal: controller.signal,
+        }),
+      (err: any) => err?.name === "AbortError" || /aborted/i.test(err?.message)
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("token-store module exports match auth re-exports and resolve XDG default path", async () => {
   const tokenStoreModule = await import("../src/token-store.js");
   const authModule = await import("../src/auth.js");

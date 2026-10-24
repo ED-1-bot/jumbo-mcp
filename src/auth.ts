@@ -218,8 +218,27 @@ export async function authFetch(
         },
         (res) => {
           const chunks: Buffer[] = [];
+          const onAbort = () => {
+            res.destroy(options.signal?.reason || new Error("The operation was aborted"));
+          };
+          if (options.signal) {
+            if (options.signal.aborted) {
+              return reject(options.signal.reason || new Error("The operation was aborted"));
+            }
+            options.signal.addEventListener("abort", onAbort, { once: true });
+          }
+
           res.on("data", (c) => chunks.push(c));
+          res.on("error", (e) => {
+            if (options.signal) {
+              options.signal.removeEventListener("abort", onAbort);
+            }
+            reject(e);
+          });
           res.on("end", () => {
+            if (options.signal) {
+              options.signal.removeEventListener("abort", onAbort);
+            }
             const body = Buffer.concat(chunks).toString("utf-8");
             resolve({
               ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300,
