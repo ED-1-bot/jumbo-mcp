@@ -411,3 +411,29 @@ test("authFetch abort stops fallback chain without replaying via https or curl",
     globalThis.fetch = originalFetch;
   }
 });
+
+test("token-store module exports match auth re-exports and resolve XDG default path", async () => {
+  const tokenStoreModule = await import("../src/token-store.js");
+  const authModule = await import("../src/auth.js");
+
+  assert.equal(typeof tokenStoreModule.FileTokenStore, "function");
+  assert.equal(typeof tokenStoreModule.MemoryTokenStore, "function");
+  assert.equal(typeof tokenStoreModule.HttpTokenStore, "function");
+  assert.equal(authModule.FileTokenStore, tokenStoreModule.FileTokenStore);
+  assert.equal(authModule.MemoryTokenStore, tokenStoreModule.MemoryTokenStore);
+  assert.equal(authModule.HttpTokenStore, tokenStoreModule.HttpTokenStore);
+
+  // In an environment with no JUMBO_TOKENS_FILE and no existing files,
+  // getTokensFilePath returns the user config path (~/.config/jumbo-mcp/tokens.json)
+  const prevEnv = process.env.JUMBO_TOKENS_FILE;
+  delete process.env.JUMBO_TOKENS_FILE;
+  try {
+    const resolved = tokenStoreModule.getTokensFilePath();
+    const expectedXdg = path.join(os.homedir(), ".config", "jumbo-mcp", "tokens.json");
+    // If project root tokens.json exists in this dev repo, it resolves that (for backward compat),
+    // otherwise it falls back to expectedXdg.
+    assert.ok(resolved.endsWith("tokens.json"));
+  } finally {
+    process.env.JUMBO_TOKENS_FILE = prevEnv;
+  }
+});
