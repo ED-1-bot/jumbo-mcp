@@ -574,10 +574,14 @@ export function buildAuthorizeUrl(
  * that fails (e.g. EBADF in Node 26 on Darwin during child process cleanup),
  * falls back to node:https, and finally to system curl to guarantee success.
  */
-async function authFetch(
+export async function authFetch(
   urlStr: string,
   options: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }
 ): Promise<{ ok: boolean; status: number; text: () => Promise<string>; json: () => Promise<any> }> {
+  if (options.signal?.aborted) {
+    throw options.signal.reason || new Error("The operation was aborted");
+  }
+
   let lastErr: any = null;
 
   // 1. Try global fetch (with quick retry on transient socket errors, except EBADF)
@@ -586,6 +590,9 @@ async function authFetch(
       return await fetch(urlStr, options);
     } catch (err: any) {
       lastErr = err;
+      if (options.signal?.aborted) {
+        throw options.signal.reason || err;
+      }
       const isEbadf =
         err?.message?.includes("EBADF") ||
         err?.cause?.code === "EBADF" ||
@@ -593,6 +600,10 @@ async function authFetch(
       if (isEbadf) break; // Don't retry broken socket in undici, switch to fallbacks immediately
       await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
     }
+  }
+
+  if (options.signal?.aborted) {
+    throw options.signal.reason || lastErr;
   }
 
   // 2. Try node:https with isolated agent (keepAlive disabled)
@@ -634,6 +645,13 @@ async function authFetch(
     });
   } catch (httpsErr: any) {
     lastErr = httpsErr;
+    if (options.signal?.aborted) {
+      throw options.signal.reason || httpsErr;
+    }
+  }
+
+  if (options.signal?.aborted) {
+    throw options.signal.reason || lastErr;
   }
 
   // 3. Fallback to system curl (runs in isolated process, immune to parent libuv descriptor issues)

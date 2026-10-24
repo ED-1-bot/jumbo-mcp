@@ -36,6 +36,7 @@ const {
   JumboAuthError,
   MemoryTokenStore,
   assertTokensPathWritable,
+  authFetch,
   getTokensFilePath,
   getTokenStore,
   loadTokens,
@@ -379,5 +380,34 @@ test("concurrent refreshes with a lockless store coalesce in-process via single-
     assert.equal(fetchCalls, 1, "lockless store must coalesce in-flight calls inside the same process");
   } finally {
     setTokenStore(null);
+  }
+});
+
+test("authFetch abort stops fallback chain without replaying via https or curl", async () => {
+  const controller = new AbortController();
+  controller.abort();
+
+  let fetchAttempted = false;
+  const originalFetch = globalThis.fetch;
+  (globalThis as any).fetch = async () => {
+    fetchAttempted = true;
+    const err = new Error("The operation was aborted");
+    err.name = "AbortError";
+    throw err;
+  };
+
+  try {
+    await assert.rejects(
+      () =>
+        authFetch("https://example.com/oauth/token", {
+          method: "POST",
+          headers: {},
+          signal: controller.signal,
+        }),
+      (err: any) => err?.name === "AbortError" || /aborted/i.test(err?.message)
+    );
+    assert.equal(fetchAttempted, false, "already aborted request must not even dispatch fetch");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
