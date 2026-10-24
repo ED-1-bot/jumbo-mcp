@@ -57,7 +57,7 @@ function toolError(error: any) {
 }
 
 async function showStatus(): Promise<void> {
-  let tokens = loadTokens();
+  let tokens = await loadTokens();
   if (!tokens && process.env.JUMBO_REFRESH_TOKEN) {
     // Bootstrap: the only moment JUMBO_REFRESH_TOKEN is authoritative. The
     // rotated token it yields is only useful if it lands on disk, so a failed

@@ -34,13 +34,16 @@ const {
   AUTH_CONFIG,
   CUSTOMER_ID_CLAIM,
   JumboAuthError,
+  MemoryTokenStore,
   assertTokensPathWritable,
   getTokensFilePath,
+  getTokenStore,
   loadTokens,
   refreshTokens,
   getValidAccessToken,
   resolveRefreshToken,
   saveTokens,
+  setTokenStore,
 } = await import("../src/auth.js");
 
 type Call = { url: string; body: any };
@@ -280,5 +283,26 @@ test("assertTokensPathWritable throws TOKENS_NOT_PERSISTED when path is unwritab
     );
   } finally {
     process.env.JUMBO_TOKENS_FILE = previous;
+  }
+});
+
+test("custom TokenStore can be plugged in and receives rotated tokens", async () => {
+  const memStore = new MemoryTokenStore({
+    access_token: "old-access",
+    refresh_token: "mem-rt-1",
+    domain: AUTH_CONFIG.domain,
+    client_id: AUTH_CONFIG.client_id,
+  });
+  setTokenStore(memStore);
+
+  try {
+    assert.equal((await loadTokens())?.refresh_token, "mem-rt-1");
+    installFetch(() => json({ access_token: GOOD_TOKEN, expires_in: 86400, refresh_token: "mem-rt-2" }));
+
+    await refreshTokens();
+    assert.equal((await loadTokens())?.refresh_token, "mem-rt-2");
+    assert.equal(calls[0].body.refresh_token, "mem-rt-1");
+  } finally {
+    setTokenStore(null); // restore default FileTokenStore
   }
 });
